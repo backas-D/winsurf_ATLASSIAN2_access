@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "ALM_MCP_STDIO": {
+      "command": "node",
+      "args": [
+        "C:\\Tools\\alm-mcp-stdio\\dist\\index.js"
+      ]
+    }
+  }
+}
