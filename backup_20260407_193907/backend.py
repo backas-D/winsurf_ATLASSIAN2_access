@@ -24,30 +24,6 @@ TRAINING_OUTPUT_PATH = BASE_DIR / "training_engine.md"
 TEST_RESULT_PATH = BASE_DIR / "test_result.md"
 MCP_CONFIG_PATH = BASE_DIR / "mcp_config.json"
 
-OEM_PROJECT_PREFIXES = {
-    "KGM": ["J", "Q", "U", "Y", "O", "X"],
-    "HMC": ["OV", "CL", "CD", "CV", "DL", "KA", "LW", "YB", "QV", "KY", 
-            "GL", "JG", "JK", "JW", "JX", "RG", "RS", "SK", "SP", "RJ", 
-            "QX", "QL", "PU", "PD", "NU", "NP", "SQ", "SU", "SX", "TM", 
-            "YG", "YC", "TAM", "KS", "MQ", "NEON", "IG", "IK", "EG", 
-            "FE", "HR", "AX", "BN", "BR"],
-    "KMC": ["OV", "CL", "CD", "CV", "DL", "KA", "LW", "YB", "QV", "KY", 
-            "GL", "JG", "JK", "JW", "JX", "RG", "RS", "SK", "SP", "RJ", 
-            "QX", "QL", "PU", "PD", "NU", "NP", "SQ", "SU", "SX", "TM", 
-            "YG", "YC", "TAM", "KS", "MQ", "NEON", "IG", "IK", "EG", 
-            "FE", "HR", "AX", "BN", "BR"],
-    "Genesis": ["GV", "G70", "G80", "G90", "GV60", "GV70", "GV80"],
-    "STLA": ["F2", "F3", "F4"]
-}
-
-OEM_ROOT_PAGES = {
-    "KGM": "53087142",
-    "HMC": "48627901",
-    "KMC": "330446288",
-    "Genesis": "330446292",
-    "STLA": "231411537"
-}
-
 
 @dataclass
 class AppConfig:
@@ -83,9 +59,6 @@ class JiraIssue:
 @dataclass
 class SearchState:
     project_name: str = ""
-    selected_oem: str = "KGM"
-    show_project_selector: bool = False
-    discovered_projects: list[dict] = field(default_factory=list)
     confluence_tree: list[dict[str, Any]] = field(default_factory=list)
     jira_issues: list[dict[str, Any]] = field(default_factory=list)
     selected_confluence_page_id: str = ""
@@ -109,18 +82,9 @@ def load_env_values(env_path: Path = ENV_PATH) -> dict[str, str]:
 
 def load_config() -> AppConfig:
     raw = load_env_values()
-    
-    valid_models = [
-        "gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-4", 
-        "gpt-3.5-turbo", "gpt-3.5-turbo-16k"
-    ]
-    model = raw.get("OPENAI_MODEL", "gpt-4o-mini")
-    if model not in valid_models:
-        model = "gpt-4o-mini"
-    
     return AppConfig(
         openai_api_key=raw.get("OPENAI_API_KEY", ""),
-        openai_model=model,
+        openai_model=raw.get("OPENAI_MODEL", "gpt-5.4"),
         jira_base_url=raw.get("JIRA_BASE_URL", "").rstrip("/"),
         jira_pat=raw.get("JIRA_PAT", "").strip(),
         confluence_base_url=raw.get("CONFLUENCE_BASE_URL", "").rstrip("/"),
@@ -440,53 +404,8 @@ def confluence_tree_to_dict(node: ConfluenceNode) -> dict[str, Any]:
     }
 
 
-def find_related_projects(project_name: str, cfg: AppConfig) -> list[str]:
-    if not cfg.confluence_base_url or not cfg.confluence_pat:
-        return [project_name]
-    
-    headers = auth_headers(cfg.confluence_pat)
-    cql = f'text~"{project_name}" AND type=page ORDER BY lastmodified DESC'
-    
-    try:
-        payload = request_json(
-            f"{cfg.confluence_base_url}/rest/api/content/search?{urlencode({'cql': cql, 'limit': 50})}",
-            headers,
-        )
-        results = payload.get("results", [])
-        
-        related = set()
-        patterns = [
-            r'([A-Z]\d{3})',
-            r'([A-Z]{2}\d{3})',
-        ]
-        
-        for page in results:
-            title = str(page.get("title", ""))
-            for pattern in patterns:
-                matches = re.findall(pattern, title)
-                for match in matches:
-                    if match and len(match) >= 3:
-                        related.add(match)
-        
-        if project_name.upper() in related:
-            related.discard(project_name.upper())
-            related.add(project_name)
-        
-        return sorted(related) if related else [project_name]
-        
-    except Exception:
-        return [project_name]
-
-
 def find_confluence_pages(project_name: str, cfg: AppConfig) -> list[dict[str, Any]]:
-    related_projects = find_related_projects(project_name, cfg)
-    
-    if len(related_projects) > 1:
-        combined_name = ",".join(related_projects)
-    else:
-        combined_name = project_name
-    
-    root = pick_confluence_root(combined_name, cfg)
+    root = pick_confluence_root(project_name, cfg)
     if root is None:
         return []
     return [confluence_tree_to_dict(build_confluence_tree_from_root(root, cfg))]
@@ -673,205 +592,6 @@ def generate_training_engine() -> str:
         conn.execute("INSERT INTO training_runs (created_at, source_file, result_markdown) VALUES (?, ?, ?)", (datetime.now().isoformat(timespec="seconds"), TEST_RESULT_PATH.name, result))
         conn.commit()
     return result
-
-
-def detect_oem_from_project_code(project_code: str) -> str | None:
-    code_upper = project_code.strip().upper()
-    
-    for oem, prefixes in OEM_PROJECT_PREFIXES.items():
-        sorted_prefixes = sorted(prefixes, key=len, reverse=True)
-        for prefix in sorted_prefixes:
-            if code_upper.startswith(prefix):
-                return oem
-    
-    return None
-
-
-def extract_project_code_from_title(title: str) -> str | None:
-    title = title.strip()
-    
-    patterns = [
-        r'^([A-Z]{2,4}(?:\s+\d+[A-Z]*)?(?:\.\d+)?(?:[A-Z]+)?)\s*\[',
-        r'^([A-Z]{2,4}\d*(?:\s+[A-Z]+)?)\s+\[',
-        r'^([A-Z]\d+[A-Z]*)\s*\[',
-        r'^(F\dX?/F\dU?)\s*\[',
-    ]
-    
-    for pattern in patterns:
-        match = re.search(pattern, title)
-        if match:
-            return match.group(1).strip()
-    
-    return None
-
-
-def is_valid_project_code(title: str) -> bool:
-    title_upper = title.strip().upper()
-    
-    skip_keywords = ['COMPLETE', 'ARCHIVE', 'TEMPLATE', 'COMMON', 'HISTORY', 'DESIGN KOREA', 'VEHICLE DEV']
-    if any(keyword in title_upper for keyword in skip_keywords):
-        return False
-    
-    project_code = extract_project_code_from_title(title)
-    return project_code is not None
-
-
-def is_kgm_project_code(title: str) -> bool:
-    title_stripped = title.strip()
-    
-    if any(ord(c) > 127 for c in title_stripped):
-        return False
-    
-    title_upper = title_stripped.upper()
-    
-    patterns = [
-        r'^[ACEJOQUXY]\d{2,4}[,\s]',
-        r'^[ACEJOQUXY]\d{2,4}\s*\[',
-        r'^FCM-\d+\s+[ACEJOQUXY]\d{2,4}',
-        r'^[ACEJOQUXY]\d{2,4}\s+[ACEJOQUXY]\d{2,4}',
-    ]
-    
-    matched = False
-    for pattern in patterns:
-        if re.search(pattern, title_upper):
-            matched = True
-            break
-    
-    if not matched:
-        return False
-    
-    exclude_keywords = ['DAILY', 'TASK', 'REPORT', 'MEETING', 'REVIEW', 'TEMPLATE', 'REQUIREMENT', 'SAMPLE']
-    if any(keyword in title_upper for keyword in exclude_keywords):
-        return False
-    
-    return True
-
-
-def get_oem_projects(oem: str, cfg: AppConfig) -> list[dict]:
-    if not cfg.confluence_base_url or not cfg.confluence_pat:
-        return []
-    
-    root_page_id = OEM_ROOT_PAGES.get(oem, "")
-    if not root_page_id:
-        return []
-    
-    try:
-        if oem == "KGM":
-            def collect_kgm_projects(page_id: str, depth: int = 0) -> list[dict]:
-                if depth > 3:
-                    return []
-                
-                try:
-                    children = fetch_confluence_children(page_id, cfg)
-                except Exception:
-                    return []
-                
-                projects = []
-                
-                for child in children:
-                    title = str(child.get("title", ""))
-                    child_id = str(child.get("id", ""))
-                    webui = child.get("_links", {}).get("webui", "")
-                    url = webui if str(webui).startswith("http") else f"{cfg.confluence_base_url}{webui}"
-                    
-                    if is_kgm_project_code(title):
-                        projects.append({
-                            "id": child_id,
-                            "title": title,
-                            "url": url,
-                            "oem": oem
-                        })
-                    
-                    sub_projects = collect_kgm_projects(child_id, depth + 1)
-                    projects.extend(sub_projects)
-                
-                return projects
-            
-            all_projects = collect_kgm_projects(root_page_id)
-            
-            seen = set()
-            unique_projects = []
-            for project in all_projects:
-                if project["id"] not in seen:
-                    seen.add(project["id"])
-                    unique_projects.append(project)
-            
-            unique_projects.sort(key=lambda p: p["title"])
-            return unique_projects
-        
-        else:
-            children = fetch_confluence_children(root_page_id, cfg)
-            
-            projects = []
-            for child in children:
-                title = str(child.get("title", ""))
-                child_id = str(child.get("id", ""))
-                webui = child.get("_links", {}).get("webui", "")
-                url = webui if str(webui).startswith("http") else f"{cfg.confluence_base_url}{webui}"
-                
-                projects.append({
-                    "id": child_id,
-                    "title": title,
-                    "url": url,
-                    "oem": oem
-                })
-            
-            projects.sort(key=lambda p: p["title"])
-            return projects
-        
-    except Exception as e:
-        return []
-
-
-def flatten_tree(tree_list: list[dict]) -> list[dict]:
-    flat = []
-    
-    def walk(node):
-        flat.append({
-            "id": node.get("id"),
-            "title": node.get("title"),
-            "url": node.get("url")
-        })
-        for child in node.get("children", []):
-            walk(child)
-    
-    for tree in tree_list:
-        walk(tree)
-    
-    return flat
-
-
-def extract_project_groups(tree_pages: list) -> list[dict]:
-    flat_pages = flatten_tree(tree_pages)
-    projects = {}
-    
-    for page in flat_pages:
-        title = str(page.get("title", ""))
-        
-        patterns = [
-            r"([A-Z]{3,6})_([A-Z]\d{3})",
-            r"([A-Z]{3,6})\s+([A-Z]\d{3})",
-        ]
-        
-        for pattern in patterns:
-            match = re.search(pattern, title)
-            if match:
-                project_code = match.group(1)
-                
-                if project_code not in projects:
-                    projects[project_code] = {
-                        "id": project_code,
-                        "title": f"{project_code} 프로젝트",
-                        "type": "Vehicle Platform",
-                        "count": 0,
-                        "pages": []
-                    }
-                
-                projects[project_code]["pages"].append(page)
-                projects[project_code]["count"] += 1
-                break
-    
-    return list(projects.values())
 
 
 def export_mcp_config(cfg: AppConfig) -> dict[str, Any]:

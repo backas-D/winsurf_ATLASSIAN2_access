@@ -1,0 +1,189 @@
+﻿<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Atlassian Access Hub</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=Newsreader:opsz,wght@6..72,500;6..72,700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body>
+  <div class="page-shell">
+    <aside class="sidebar">
+      <div>
+        <p class="eyebrow">ATLASSIAN ACCESS</p>
+        <h1>프로젝트 탐색, 수정, 업로드를 한 화면에서.</h1>
+        <p class="lede">README 기준 MCP 등록 정보와 Jira, Confluence 운영 작업을 함께 다루는 콘솔입니다.</p>
+      </div>
+
+      <form class="stack" method="post" action="/search/confluence">
+        <label for="project_name">프로젝트 이름</label>
+        <input id="project_name" name="project_name" value="{{ state.project_name }}" placeholder="예: IDA 또는 KGMQ300">
+        <button type="submit">Confluence 페이지 검색</button>
+      </form>
+
+      <form class="stack" method="post" action="/search/jira">
+        <label for="jira_project_search">프로젝트 이름</label>
+        <input id="jira_project_search" name="project_name" value="{{ state.project_name }}" placeholder="예: IDA 또는 KGMQ300">
+        <button type="submit">Jira 이슈 검색</button>
+      </form>
+
+      <div class="mcp-card">
+        <p class="card-label">MCP Preview</p>
+        <pre>{{ mcp_preview | tojson(indent=2) }}</pre>
+      </div>
+    </aside>
+
+    <main class="content">
+      <section class="hero">
+        <div class="hero-copy">
+          <p class="eyebrow">Workbench</p>
+          <h2>Confluence 트리와 Jira 이슈 목록을 즉시 열람하고 바로 수정합니다.</h2>
+        </div>
+        {% if state.flash_error %}
+          <div class="flash error">{{ state.flash_error }}</div>
+        {% endif %}
+        {% if state.flash_success %}
+          <div class="flash success">{{ state.flash_success }}</div>
+        {% endif %}
+      </section>
+
+      <section class="panel-grid">
+        <article class="panel">
+          <div class="panel-head">
+            <h3>Confluence 페이지 검색 결과</h3>
+            <p>프로젝트 루트와 하위 트리 구조를 모두 표시합니다.</p>
+          </div>
+          <div class="tree-wrap">
+            {% if state.confluence_tree %}
+              {% macro render_node(node) %}
+                <li>
+                  <a href="{{ node.url }}" target="_blank" rel="noreferrer">{{ node.title }}</a>
+                  {% if node.children %}
+                    <ul>
+                      {% for child in node.children %}
+                        {{ render_node(child) }}
+                      {% endfor %}
+                    </ul>
+                  {% endif %}
+                </li>
+              {% endmacro %}
+              <ul class="tree">
+                {% for node in state.confluence_tree %}
+                  {{ render_node(node) }}
+                {% endfor %}
+              </ul>
+            {% else %}
+              <p class="empty">검색 결과가 아직 없습니다.</p>
+            {% endif %}
+          </div>
+        </article>
+
+        <article class="panel">
+          <div class="panel-head">
+            <h3>Jira 이슈 검색 결과</h3>
+            <p>프로젝트의 Jira 이슈 목록을 표시하고 클릭 시 브라우저에서 엽니다.</p>
+          </div>
+          <div class="issue-list">
+            {% if state.jira_issues %}
+              {% for issue in state.jira_issues %}
+                <a class="issue-card" href="{{ issue.url }}" target="_blank" rel="noreferrer">
+                  <strong>{{ issue.key }}</strong>
+                  <span>{{ issue.summary }}</span>
+                  <small>{{ issue.issue_type }} · {{ issue.status }} · {{ issue.assignee }}</small>
+                </a>
+              {% endfor %}
+            {% else %}
+              <p class="empty">검색 결과가 아직 없습니다.</p>
+            {% endif %}
+          </div>
+        </article>
+      </section>
+
+      <section class="workspace-grid">
+        <article class="panel">
+          <div class="panel-head">
+            <h3>Confluence 수정 / 파일 업로드</h3>
+            <p>페이지 본문을 추가하거나 첨부 파일을 올립니다.</p>
+          </div>
+
+          <form class="stack" method="post" action="/confluence/update">
+            <input type="hidden" name="project_name" value="{{ state.project_name }}">
+            <label for="confluence_page_id">Page ID</label>
+            <input id="confluence_page_id" name="confluence_page_id" value="{{ state.selected_confluence_page_id }}" placeholder="Confluence pageId">
+            <label for="confluence_title">새 제목(선택)</label>
+            <input id="confluence_title" name="confluence_title" placeholder="제목을 바꾸지 않으려면 비워두세요">
+            <label for="confluence_append_text">추가할 내용</label>
+            <textarea id="confluence_append_text" name="confluence_append_text" rows="5" placeholder="본문 끝에 덧붙일 내용을 입력하세요"></textarea>
+            <button type="submit">Confluence 내용 추가</button>
+          </form>
+
+          <form class="stack" method="post" action="/confluence/upload" enctype="multipart/form-data">
+            <input type="hidden" name="project_name" value="{{ state.project_name }}">
+            <label for="confluence_upload_page_id">업로드 대상 Page ID</label>
+            <input id="confluence_upload_page_id" name="confluence_upload_page_id" value="{{ state.selected_confluence_page_id }}">
+            <label for="confluence_file">첨부 파일</label>
+            <input id="confluence_file" type="file" name="confluence_file">
+            <button type="submit">Confluence 파일 업로드</button>
+          </form>
+        </article>
+
+        <article class="panel">
+          <div class="panel-head">
+            <h3>Jira 생성 / 수정</h3>
+            <p>새 이슈 생성과 기존 이슈 업데이트를 분리해서 처리합니다.</p>
+          </div>
+
+          <form class="stack" method="post" action="/jira/create">
+            <input type="hidden" name="project_name" value="{{ state.project_name }}">
+            <label for="jira_project_key">Project Key</label>
+            <input id="jira_project_key" name="jira_project_key" placeholder="예: IDA">
+            <label for="jira_issue_type">Issue Type</label>
+            <input id="jira_issue_type" name="jira_issue_type" value="Task">
+            <label for="jira_summary">Summary</label>
+            <input id="jira_summary" name="jira_summary" placeholder="이슈 제목">
+            <label for="jira_description">Description</label>
+            <textarea id="jira_description" name="jira_description" rows="4" placeholder="이슈 설명"></textarea>
+            <button type="submit">Jira 이슈 생성</button>
+          </form>
+
+          <form class="stack" method="post" action="/jira/update">
+            <input type="hidden" name="project_name" value="{{ state.project_name }}">
+            <label for="jira_issue_key">Issue Key</label>
+            <input id="jira_issue_key" name="jira_issue_key" placeholder="예: IDA-123">
+            <label for="jira_update_summary">새 Summary(선택)</label>
+            <input id="jira_update_summary" name="jira_update_summary">
+            <label for="jira_update_description">새 Description(선택)</label>
+            <textarea id="jira_update_description" name="jira_update_description" rows="4"></textarea>
+            <button type="submit">Jira 이슈 수정</button>
+          </form>
+        </article>
+      </section>
+
+      <section class="workspace-grid">
+        <article class="panel">
+          <div class="panel-head">
+            <h3>최근 작업 기록</h3>
+            <p>SQLite에 저장된 최근 작업 로그입니다.</p>
+          </div>
+          <div class="activity-list">
+            {% if recent_activity %}
+              {% for item in recent_activity %}
+                <div class="activity-item">
+                  <strong>{{ item.action_type }} · {{ item.target_type }}</strong>
+                  <span>{{ item.target_key }}</span>
+                  <small>{{ item.created_at }}</small>
+                </div>
+              {% endfor %}
+            {% else %}
+              <p class="empty">아직 기록이 없습니다.</p>
+            {% endif %}
+          </div>
+        </article>
+      </section>
+    </main>
+  </div>
+</body>
+</html>

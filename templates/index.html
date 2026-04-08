@@ -18,15 +18,25 @@
         <p class="lede">README 기준 MCP 등록 정보와 Jira, Confluence 운영 작업을 함께 다루는 콘솔입니다.</p>
       </div>
 
-      <form class="stack" method="post" action="/search/confluence">
-        <label for="project_name">프로젝트 이름</label>
-        <input id="project_name" name="project_name" value="{{ state.project_name }}" placeholder="예: IDA 또는 KGMQ300">
-        <button type="submit">Confluence 페이지 검색</button>
-      </form>
+      <div class="oem-selector">
+        <label for="oem_select">OEM 선택</label>
+        <select id="oem_select" name="oem">
+          <option value="KGM" {{ 'selected' if state.selected_oem == 'KGM' else '' }}>KGM</option>
+          <option value="HMC" {{ 'selected' if state.selected_oem == 'HMC' else '' }}>HMC</option>
+          <option value="KMC" {{ 'selected' if state.selected_oem == 'KMC' else '' }}>KMC</option>
+          <option value="Genesis" {{ 'selected' if state.selected_oem == 'Genesis' else '' }}>Genesis</option>
+          <option value="STLA" {{ 'selected' if state.selected_oem == 'STLA' else '' }}>STLA</option>
+        </select>
+      </div>
+
+      <div class="stack">
+        <button type="button" onclick="showOEMProjectSelector()" class="primary-btn">Confluence 페이지 검색</button>
+      </div>
 
       <form class="stack" method="post" action="/search/jira">
-        <label for="jira_project_search">프로젝트 이름</label>
-        <input id="jira_project_search" name="project_name" value="{{ state.project_name }}" placeholder="예: IDA 또는 KGMQ300">
+        <input type="hidden" id="jira_oem" name="oem" value="{{ state.selected_oem }}">
+        <label for="jira_project_search">프로젝트 코드</label>
+        <input id="jira_project_search" name="project_name" value="{{ state.project_name }}" placeholder="예: J115 또는 OV123">
         <button type="submit">Jira 이슈 검색</button>
       </form>
 
@@ -183,7 +193,349 @@
           </div>
         </article>
       </section>
+
+      <section class="chat-section">
+        <article class="panel chat-panel">
+          <div class="panel-head">
+            <h3>🤖 AI Chat Bot</h3>
+            <p>자연어로 Jira/Confluence 작업을 요청하세요 (모델: gpt-4o-mini)</p>
+            <button id="clearChatBtn" class="btn-secondary">대화 초기화</button>
+          </div>
+          
+          <div id="chatMessages" class="chat-messages">
+            <div class="chat-message system">
+              <div class="message-content">
+                <p>안녕하세요! Atlassian 작업을 도와드리는 AI 어시스턴트입니다.</p>
+                <p>예시:</p>
+                <ul>
+                  <li>"IDA 프로젝트의 최근 이슈 10개 보여줘"</li>
+                  <li>"AO 스페이스에서 release 관련 페이지 찾아줘"</li>
+                  <li>"IDA-1001 이슈 요약해줘"</li>
+                </ul>
+              </div>
+            </div>
+          </div>
+          
+          <div class="chat-input-container">
+            <textarea id="chatInput" class="chat-input" placeholder="메시지를 입력하세요..." rows="3"></textarea>
+            <button id="sendChatBtn" class="btn-primary">전송</button>
+          </div>
+          
+          <div id="chatStatus" class="chat-status"></div>
+        </article>
+      </section>
     </main>
   </div>
+
+  <!-- OEM Project Selector Modal -->
+  <div id="oemProjectSelectorModal" class="modal" style="display: none;">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>� <span id="modalOEMName">KGM</span> 프로젝트 선택</h3>
+        <button class="modal-close" onclick="closeOEMProjectModal()">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="search-box">
+          <input type="text" id="projectFilterInput" placeholder="프로젝트 이름으로 필터링..." 
+                 onkeyup="filterProjects()">
+        </div>
+        <div id="oemProjectList" class="project-list">
+          <div class="loading">프로젝트 목록을 불러오는 중...</div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn-secondary" onclick="closeOEMProjectModal()">취소</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // OEM Project Selector
+    const oemSelect = document.getElementById('oem_select');
+    const jiraProjectInput = document.getElementById('jira_project_search');
+    const jiraOemInput = document.getElementById('jira_oem');
+    
+    let allOEMProjects = [];
+    let filteredOEMProjects = [];
+
+    const oemPrefixes = {
+      "KGM": ["J", "Q", "U", "Y", "O", "X"],
+      "HMC": ["OV", "CL", "CD", "CV", "DL", "KA", "LW", "YB", "QV", "KY", 
+              "GL", "JG", "JK", "JW", "JX", "RG", "RS", "SK", "SP", "RJ", 
+              "QX", "QL", "PU", "PD", "NU", "NP", "SQ", "SU", "SX", "TM", 
+              "YG", "YC", "TAM", "KS", "MQ", "NEON", "IG", "IK", "EG", 
+              "FE", "HR", "AX", "BN", "BR"],
+      "KMC": ["OV", "CL", "CD", "CV", "DL", "KA", "LW", "YB", "QV", "KY", 
+              "GL", "JG", "JK", "JW", "JX", "RG", "RS", "SK", "SP", "RJ", 
+              "QX", "QL", "PU", "PD", "NU", "NP", "SQ", "SU", "SX", "TM", 
+              "YG", "YC", "TAM", "KS", "MQ", "NEON", "IG", "IK", "EG", 
+              "FE", "HR", "AX", "BN", "BR"],
+      "Genesis": ["GV", "G70", "G80", "G90", "GV60", "GV70", "GV80"],
+      "STLA": ["F2", "F3", "F4"]
+    };
+
+    function detectOEM(projectCode) {
+      const code = projectCode.trim().toUpperCase();
+      
+      for (const [oem, prefixes] of Object.entries(oemPrefixes)) {
+        const sortedPrefixes = prefixes.sort((a, b) => b.length - a.length);
+        for (const prefix of sortedPrefixes) {
+          if (code.startsWith(prefix)) {
+            return oem;
+          }
+        }
+      }
+      return null;
+    }
+
+    function updateOEM(input) {
+      const detectedOEM = detectOEM(input.value);
+      if (detectedOEM) {
+        oemSelect.value = detectedOEM;
+        jiraOemInput.value = detectedOEM;
+      }
+    }
+
+    oemSelect.addEventListener('change', function() {
+      jiraOemInput.value = this.value;
+    });
+
+    jiraProjectInput.addEventListener('input', function() {
+      updateOEM(this);
+    });
+
+    function showOEMProjectSelector() {
+      const selectedOEM = oemSelect.value;
+      document.getElementById('modalOEMName').textContent = selectedOEM;
+      document.getElementById('oemProjectSelectorModal').style.display = 'flex';
+      
+      loadOEMProjects(selectedOEM);
+    }
+
+    function closeOEMProjectModal() {
+      document.getElementById('oemProjectSelectorModal').style.display = 'none';
+    }
+
+    function loadOEMProjects(oem) {
+      const projectList = document.getElementById('oemProjectList');
+      projectList.innerHTML = '<div class="loading">프로젝트 목록을 불러오는 중...</div>';
+      
+      fetch(`/api/oem-projects/${oem}`)
+        .then(response => response.json())
+        .then(data => {
+          if (data.success) {
+            allOEMProjects = data.projects;
+            filteredOEMProjects = allOEMProjects;
+            renderProjectList();
+          } else {
+            projectList.innerHTML = '<div class="error">프로젝트 목록을 불러올 수 없습니다.</div>';
+          }
+        })
+        .catch(error => {
+          projectList.innerHTML = '<div class="error">오류가 발생했습니다: ' + error.message + '</div>';
+        });
+    }
+
+    function renderProjectList() {
+      const projectList = document.getElementById('oemProjectList');
+      
+      if (filteredOEMProjects.length === 0) {
+        projectList.innerHTML = '<div class="no-results">프로젝트가 없습니다.</div>';
+        return;
+      }
+      
+      projectList.innerHTML = '';
+      
+      filteredOEMProjects.forEach(project => {
+        const item = document.createElement('div');
+        item.className = 'project-item clickable';
+        item.innerHTML = `
+          <div class="project-info">
+            <strong>${project.title}</strong>
+          </div>
+        `;
+        item.onclick = () => selectOEMProject(project);
+        projectList.appendChild(item);
+      });
+    }
+
+    function filterProjects() {
+      const filterText = document.getElementById('projectFilterInput').value.toLowerCase();
+      
+      if (!filterText) {
+        filteredOEMProjects = allOEMProjects;
+      } else {
+        filteredOEMProjects = allOEMProjects.filter(p => 
+          p.title.toLowerCase().includes(filterText)
+        );
+      }
+      
+      renderProjectList();
+    }
+
+    function selectOEMProject(project) {
+      closeOEMProjectModal();
+      
+      const statusDiv = document.querySelector('.flash.success') || document.querySelector('.flash.error');
+      if (statusDiv) {
+        statusDiv.textContent = `${project.title} 프로젝트 트리를 불러오는 중...`;
+        statusDiv.className = 'flash success';
+      }
+      
+      fetch('/api/load-project-tree', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          project_id: project.id,
+          project_title: project.title
+        })
+      })
+      .then(response => response.json())
+      .then(data => {
+        if (data.success) {
+          location.href = '/?tree=' + encodeURIComponent(JSON.stringify(data.tree));
+        } else {
+          alert('프로젝트 트리를 불러올 수 없습니다: ' + data.message);
+        }
+      })
+      .catch(error => {
+        alert('오류가 발생했습니다: ' + error.message);
+      });
+    }
+  </script>
+
+  <script>
+    const chatMessages = document.getElementById('chatMessages');
+    const chatInput = document.getElementById('chatInput');
+    const sendChatBtn = document.getElementById('sendChatBtn');
+    const clearChatBtn = document.getElementById('clearChatBtn');
+    const chatStatus = document.getElementById('chatStatus');
+    const sessionId = 'session_' + Date.now();
+
+    function addMessage(role, content, data = null) {
+      const messageDiv = document.createElement('div');
+      messageDiv.className = `chat-message ${role}`;
+      
+      const contentDiv = document.createElement('div');
+      contentDiv.className = 'message-content';
+      
+      const textP = document.createElement('p');
+      textP.textContent = content;
+      contentDiv.appendChild(textP);
+      
+      if (data && data.action_result) {
+        const resultDiv = document.createElement('div');
+        resultDiv.className = 'action-result';
+        
+        if (data.action_result.type === 'jira_issues') {
+          const ul = document.createElement('ul');
+          data.action_result.data.slice(0, 5).forEach(issue => {
+            const li = document.createElement('li');
+            li.innerHTML = `<a href="${issue.url}" target="_blank">${issue.key}: ${issue.summary}</a>`;
+            ul.appendChild(li);
+          });
+          resultDiv.appendChild(ul);
+          if (data.action_result.count > 5) {
+            const moreP = document.createElement('p');
+            moreP.textContent = `... 외 ${data.action_result.count - 5}개`;
+            resultDiv.appendChild(moreP);
+          }
+        } else if (data.action_result.type === 'confluence_pages') {
+          const ul = document.createElement('ul');
+          data.action_result.data.slice(0, 5).forEach(page => {
+            const li = document.createElement('li');
+            li.innerHTML = `<a href="${page.url}" target="_blank">${page.title}</a>`;
+            ul.appendChild(li);
+          });
+          resultDiv.appendChild(ul);
+          if (data.action_result.count > 5) {
+            const moreP = document.createElement('p');
+            moreP.textContent = `... 외 ${data.action_result.count - 5}개`;
+            resultDiv.appendChild(moreP);
+          }
+        }
+        
+        contentDiv.appendChild(resultDiv);
+      }
+      
+      messageDiv.appendChild(contentDiv);
+      chatMessages.appendChild(messageDiv);
+      chatMessages.scrollTop = chatMessages.scrollHeight;
+    }
+
+    async function sendMessage() {
+      const message = chatInput.value.trim();
+      if (!message) return;
+      
+      addMessage('user', message);
+      chatInput.value = '';
+      sendChatBtn.disabled = true;
+      chatStatus.textContent = '처리 중...';
+      
+      try {
+        const response = await fetch('/api/chat', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            message: message,
+            session_id: sessionId
+          })
+        });
+        
+        const data = await response.json();
+        
+        if (data.success) {
+          addMessage('assistant', data.message, data);
+          chatStatus.textContent = '';
+        } else {
+          addMessage('system', '오류: ' + data.message);
+          chatStatus.textContent = '';
+        }
+      } catch (error) {
+        addMessage('system', '오류: ' + error.message);
+        chatStatus.textContent = '';
+      } finally {
+        sendChatBtn.disabled = false;
+        chatInput.focus();
+      }
+    }
+
+    async function clearChat() {
+      if (!confirm('대화 이력을 초기화하시겠습니까?')) return;
+      
+      try {
+        const response = await fetch('/api/chat/clear', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            session_id: sessionId
+          })
+        });
+        
+        const data = await response.json();
+        
+        if (data.success) {
+          chatMessages.innerHTML = '';
+          addMessage('system', '대화 이력이 초기화되었습니다.');
+        }
+      } catch (error) {
+        addMessage('system', '오류: ' + error.message);
+      }
+    }
+
+    sendChatBtn.addEventListener('click', sendMessage);
+    clearChatBtn.addEventListener('click', clearChat);
+    
+    chatInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendMessage();
+      }
+    });
+  </script>
 </body>
 </html>

@@ -1,0 +1,2 @@
+[2026-04-07 09:44:54,362] INFO in main: Application started in production mode
+INFO:waitress:Serving on http://0.0.0.0:5000
