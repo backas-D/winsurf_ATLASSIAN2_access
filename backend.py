@@ -585,11 +585,196 @@ def confluence_get_page(page_id: str, cfg: AppConfig) -> dict[str, Any]:
     )
 
 
-def confluence_update_page(page_id: str, append_text: str, title: str, cfg: AppConfig) -> dict[str, Any]:
+def upload_base64_image_to_confluence(page_id: str, base64_data: str, image_index: int, cfg: AppConfig) -> str:
+    """Upload a Base64 image as a Confluence attachment and return the attachment URL"""
+    import base64
+    import io
+    import datetime
+    from werkzeug.datastructures import FileStorage
+    
+    try:
+        # Extract the actual base64 data (remove data:image/...;base64, prefix)
+        if ',' in base64_data:
+            base64_data = base64_data.split(',', 1)[1]
+        
+        # Decode base64 to binary
+        image_binary = base64.b64decode(base64_data)
+        
+        # Create a file-like object
+        file_obj = io.BytesIO(image_binary)
+        
+        # Generate unique filename with timestamp
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"image_{timestamp}_{image_index}.jpg"
+        
+        # Create FileStorage object
+        file_storage = FileStorage(
+            stream=file_obj,
+            filename=filename,
+            content_type='image/jpeg'
+        )
+        
+        # Upload as attachment
+        confluence_upload_attachment(page_id, file_storage, cfg)
+        
+        # Return Confluence image macro with proper namespace
+        return f'<p><ac:image><ri:attachment ri:filename="{filename}"/></ac:image></p>'
+    except Exception as e:
+        print(f"Failed to upload image: {e}")
+        import traceback
+        traceback.print_exc()
+        return ''
+
+
+def sanitize_html_for_confluence(html: str, page_id: str, cfg: AppConfig, file_download_links: dict | None = None) -> str:
+    """Sanitize HTML from Quill editor for Confluence XHTML compatibility"""
+    import re
+    
+    # Extract and upload Base64 images
+    image_index = 0
+    def replace_base64_image(match):
+        nonlocal image_index
+        base64_data = match.group(1)
+        image_index += 1
+        confluence_image = upload_base64_image_to_confluence(page_id, base64_data, image_index, cfg)
+        return confluence_image if confluence_image else ''
+    
+    # Replace Base64 images with Confluence image macros (handle both self-closing and regular img tags)
+    html = re.sub(r'<img[^>]*src="(data:image/[^"]+)"[^>]*/?>', replace_base64_image, html)
+    
+    # Convert file attachment text to clickable Confluence download links
+    # Pattern: 📎 <strong>filename.ext</strong> (123.45 KB)
+    def normalize_filename(name):
+        """파일명 정규화: 한글 등 비-ASCII 제거, 특수문자 정리"""
+        # 비-ASCII 문자 제거 (한글 등)
+        name = re.sub(r'[^\x00-\x7F]', '', name)
+        # 영숫자, 마침표 외 모든 문자를 _로 치환
+        name = re.sub(r'[^a-zA-Z0-9.]', '_', name)
+        # 연속 _ 제거
+        name = re.sub(r'_+', '_', name)
+        # 마침표 앞뒤 _ 제거 (예: 1_.msg → 1.msg)
+        name = re.sub(r'_\.', '.', name)
+        name = re.sub(r'\._', '.', name)
+        return name.strip('_').lower()
+    
+    def convert_file_link(match):
+        filename = match.group(1)
+        filesize = match.group(2)
+        
+        download_url = None
+        if file_download_links:
+            # 정확 매칭 시도
+            if filename in file_download_links:
+                download_url = file_download_links[filename]
+            else:
+                # 정규화 매칭 (한글이 제거된 Confluence 파일명과 비교)
+                norm = normalize_filename(filename)
+                for att_title, att_url in file_download_links.items():
+                    if normalize_filename(att_title) == norm:
+                        download_url = att_url
+                        break
+        
+        if download_url:
+            # XHTML에서 & → &amp; 이스케이프 필수
+            safe_url = download_url.replace('&', '&amp;')
+            return f'<p><strong>📎 첨부: <a href="{safe_url}">{filename}</a></strong> ({filesize})</p>'
+        
+        # Fallback: 텍스트로만 표시
+        return f'<p><strong>📎 첨부: {filename}</strong> ({filesize})</p>'
+    
+    html = re.sub(r'<p>📎 <strong>([^<]+)</strong> \(([^)]+)\)</p>', convert_file_link, html)
+    
+    # Convert Quill font size classes to inline styles
+    def convert_font_size(match):
+        size_class = match.group(1)
+        content = match.group(2)
+        
+        size_map = {
+            'ql-size-small': 'font-size: 0.75em;',
+            'ql-size-large': 'font-size: 1.5em;',
+            'ql-size-huge': 'font-size: 2em;'
+        }
+        
+        style = size_map.get(size_class, '')
+        if style:
+            return f'<span style="{style}">{content}</span>'
+        return f'<span>{content}</span>'
+    
+    # Replace font size classes with inline styles
+    html = re.sub(r'<span class="(ql-size-[^"]+)">([^<]*)</span>', convert_font_size, html)
+    
+    # Remove empty paragraphs that might cause issues
+    html = re.sub(r'<p>\s*<br/?\s*>\s*</p>', '', html)
+    html = re.sub(r'<p>\s*</p>', '', html)
+    
+    # Ensure self-closing tags are properly formatted
+    html = re.sub(r'<br(?!\s*/?>)', '<br/>', html)
+    html = re.sub(r'<br\s*>', '<br/>', html)
+    
+    return html.strip()
+
+
+def confluence_update_page(page_id: str, append_text: str, title: str, cfg: AppConfig, file_download_links: dict | None = None) -> dict[str, Any]:
     page = confluence_get_page(page_id, cfg)
     next_version = int((page.get("version") or {}).get("number", 1)) + 1
     current_body = (((page.get("body") or {}).get("storage") or {}).get("value", "")) or ""
-    new_body = f"{current_body}\n<p>{append_text.strip()}</p>" if append_text.strip() else current_body
+    
+    if append_text.strip():
+        import datetime
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        # Sanitize HTML from Quill editor and upload images
+        sanitized_html = sanitize_html_for_confluence(append_text.strip(), page_id, cfg, file_download_links)
+        
+        new_content = f'\n<p><strong>[{timestamp}]</strong></p>\n{sanitized_html}\n'
+        insert_pos = -1
+        
+        # Priority 1: Try to insert after [Software Release Note]
+        markers = ['[Software Release Note]', '[SRR] Release Note']
+        for marker in markers:
+            if marker in current_body:
+                marker_pos = current_body.find(marker)
+                # Find the end of the line/paragraph containing the marker
+                after_marker = current_body[marker_pos:]
+                
+                # Look for the next closing tag after the marker
+                close_tags = ['</p>', '</h1>', '</h2>', '</h3>', '</h4>', '</strong>']
+                min_pos = len(after_marker)
+                for tag in close_tags:
+                    pos = after_marker.find(tag)
+                    if pos != -1 and pos < min_pos:
+                        min_pos = pos + len(tag)
+                
+                insert_pos = marker_pos + min_pos
+                break
+        
+        # Priority 2: Try to insert after the info macro (참고사항)
+        if insert_pos == -1 and '<ac:structured-macro ac:name="info">' in current_body:
+            start_pos = current_body.find('<ac:structured-macro ac:name="info">')
+            if start_pos != -1:
+                # Find the corresponding closing tag
+                end_pos = current_body.find('</ac:structured-macro>', start_pos)
+                if end_pos != -1:
+                    insert_pos = end_pos + len('</ac:structured-macro>')
+        
+        # Priority 3: If no info macro, insert after page title (h1)
+        if insert_pos == -1:
+            h1_tags = ['</h1>', '</h2>']  # Try h1 first, then h2
+            for tag in h1_tags:
+                pos = current_body.find(tag)
+                if pos != -1:
+                    insert_pos = pos + len(tag)
+                    break
+        
+        # Insert at determined position or append at end
+        if insert_pos != -1:
+            new_body = current_body[:insert_pos] + new_content + current_body[insert_pos:]
+        else:
+            # Fallback: append at the end
+            new_body = f"{current_body}\n<p>{append_text.strip()}</p>"
+    else:
+        new_body = current_body
+    
     page_title = title.strip() or page.get("title", "")
     payload = request_json(
         f"{cfg.confluence_base_url}/rest/api/content/{page_id}",
@@ -897,3 +1082,12 @@ def api_generate_training():
 @backend_bp.post("/mcp/export")
 def api_export_mcp():
     return jsonify({"ok": True, "config": export_mcp_config(load_config())})
+
+
+@backend_bp.get("/recent-activity")
+def api_recent_activity():
+    from flask import request
+    limit = request.args.get('limit', 10, type=int)
+    limit = min(limit, 50)  # 최대 50개로 제한
+    activities = get_recent_activity(limit)
+    return jsonify({"ok": True, "activities": activities})

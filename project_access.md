@@ -1003,7 +1003,538 @@ patterns = [
 
 ---
 
-**문서 버전**: v1.2.0  
+## 11. v1.3.0 개선사항 (2026-04-08)
+
+### 11.1 Quill.js 리치 텍스트 에디터 도입
+
+#### 11.1.1 기존 문제점
+- 일반 textarea로는 텍스트 서식 지정 불가
+- 이미지 삽입 불가능
+- 제한적인 편집 기능
+
+#### 11.1.2 Quill.js 에디터 구현
+
+**추가된 라이브러리**:
+```html
+<link href="https://cdn.quilljs.com/1.3.6/quill.snow.css" rel="stylesheet">
+<script src="https://cdn.quilljs.com/1.3.6/quill.js"></script>
+```
+
+**에디터 기능**:
+- **텍스트 서식**: 굵게, 기울임, 밑줄
+- **폰트 크기**: Small (0.75em), Normal (1em), Large (1.5em), Huge (2em)
+- **리스트**: 순서 있는 리스트, 순서 없는 리스트
+- **이미지 삽입**: 파일 선택 또는 클립보드 붙여넣기 (Ctrl+V)
+- **서식 지우기**: Clean 버튼
+
+**에디터 초기화**:
+```javascript
+var quill = new Quill('#quill_editor', {
+  theme: 'snow',
+  placeholder: '[Software Release Note] 밑에 작성할 내용을 입력하세요.',
+  modules: {
+    toolbar: [
+      [{ 'size': ['small', false, 'large', 'huge'] }],
+      ['bold', 'italic', 'underline'],
+      [{ 'list': 'ordered'}, { 'list': 'bullet' }],
+      ['image'],
+      ['clean']
+    ]
+  }
+});
+```
+
+### 11.2 이미지 자동 압축 및 업로드
+
+#### 11.2.1 이미지 압축 기능
+
+**문제**: Base64 이미지가 너무 커서 "Request Entity Too Large" 오류 발생
+
+**해결**: 클라이언트 측 자동 압축
+```javascript
+function compressImage(file, maxWidth, maxHeight, quality) {
+  // 1. Canvas에 이미지 그리기
+  // 2. 최대 크기 제한 (800x600)
+  // 3. JPEG로 압축 (품질 70%)
+  // 4. Base64 반환
+}
+```
+
+**압축 설정**:
+- 최대 너비: 800px
+- 최대 높이: 600px
+- 압축 품질: 70%
+- 출력 포맷: JPEG
+
+**효과**:
+- Before: 1920x1080 스크린샷 → 2-3MB Base64 → 413 오류
+- After: 800x450 압축 이미지 → 100-200KB Base64 → 정상 전송 ✅
+
+#### 11.2.2 Confluence 첨부 파일 변환
+
+**문제**: Confluence는 Base64 이미지를 직접 표시하지 못함
+
+**해결**: Base64 → Confluence 첨부 파일 자동 변환
+```python
+def upload_base64_image_to_confluence(page_id, base64_data, image_index, cfg):
+    # 1. Base64 디코딩
+    image_binary = base64.b64decode(base64_data)
+    
+    # 2. 고유 파일명 생성
+    filename = f"image_{timestamp}_{image_index}.jpg"
+    
+    # 3. Confluence 첨부 파일로 업로드
+    confluence_upload_attachment(page_id, file_storage, cfg)
+    
+    # 4. Confluence 이미지 매크로 반환
+    return '<p><ac:image><ri:attachment ri:filename="..."/></ac:image></p>'
+```
+
+**변환 과정**:
+```
+Quill 에디터 (Base64)
+    ↓
+<img src="data:image/jpeg;base64,/9j/4AAQ...">
+    ↓
+첨부 파일 업로드 (image_20260408_140821_1.jpg)
+    ↓
+<ac:image><ri:attachment ri:filename="image_20260408_140821_1.jpg"/></ac:image>
+    ↓
+Confluence 페이지에 이미지 표시 ✅
+```
+
+### 11.3 스마트 콘텐츠 삽입 위치
+
+#### 11.3.1 우선순위 기반 삽입 로직
+
+**삽입 위치 우선순위**:
+1. **[Software Release Note] 섹션 아래** (1순위)
+2. **참고사항 매크로 아래** (2순위)
+3. **페이지 제목(h1/h2) 아래** (3순위)
+4. **페이지 끝** (폴백)
+
+**구현 코드**:
+```python
+# Priority 1: [Software Release Note] 또는 [SRR] Release Note
+markers = ['[Software Release Note]', '[SRR] Release Note']
+for marker in markers:
+    if marker in current_body:
+        insert_pos = find_marker_end(marker)
+
+# Priority 2: 참고사항 매크로
+if insert_pos == -1 and '<ac:structured-macro ac:name="info">' in current_body:
+    insert_pos = find_macro_end()
+
+# Priority 3: 페이지 제목
+if insert_pos == -1:
+    insert_pos = find_h1_or_h2_end()
+```
+
+**삽입 형식**:
+```html
+<p><strong>[2026-04-08 14:05:58]</strong></p>
+<p>사용자가 입력한 내용 (서식 포함)</p>
+<p><ac:image><ri:attachment ri:filename="image_20260408_140558_1.jpg"/></ac:image></p>
+```
+
+### 11.4 HTML → Confluence XHTML 변환
+
+#### 11.4.1 XHTML 호환성 처리
+
+**문제**: Quill HTML이 Confluence XHTML 파서와 호환되지 않음
+
+**해결**: HTML Sanitization 함수
+```python
+def sanitize_html_for_confluence(html, page_id, cfg):
+    # 1. Base64 이미지 → 첨부 파일 변환
+    html = convert_images_to_attachments(html)
+    
+    # 2. 폰트 크기 클래스 → 인라인 스타일
+    html = convert_font_size_classes(html)
+    
+    # 3. 빈 paragraph 제거
+    html = remove_empty_paragraphs(html)
+    
+    # 4. Self-closing 태그 정규화
+    html = normalize_self_closing_tags(html)
+    
+    return html
+```
+
+#### 11.4.2 폰트 크기 변환
+
+**Quill 출력**:
+```html
+<span class="ql-size-large">큰 텍스트</span>
+```
+
+**Confluence 변환**:
+```html
+<span style="font-size: 1.5em;">큰 텍스트</span>
+```
+
+**크기 매핑**:
+- `ql-size-small` → `font-size: 0.75em;`
+- (기본값) → (없음)
+- `ql-size-large` → `font-size: 1.5em;`
+- `ql-size-huge` → `font-size: 2em;`
+
+### 11.5 UI/UX 개선
+
+#### 11.5.1 "새 제목(선택)" 필드 제거
+
+**변경 이유**:
+- 제목 변경은 드물게 사용됨
+- UI 간소화 필요
+- Confluence에서 직접 제목 수정 가능
+
+**변경 사항**:
+- `confluence_title` input 필드 제거
+- hidden input으로 빈 값 전송 (기존 제목 유지)
+
+#### 11.5.2 Placeholder 텍스트 개선
+
+**Before**: "본문 끝에 덧붙일 내용을 입력하세요"  
+**After**: "[Software Release Note] 밑에 작성할 내용을 입력하세요."
+
+**효과**: 사용자가 삽입 위치를 명확히 인지
+
+#### 11.5.3 에디터 스타일링
+
+**CSS 커스터마이징**:
+```css
+#quill_editor {
+  background: var(--paper-strong);
+  border-radius: 16px;
+}
+
+.ql-toolbar {
+  border-radius: 16px 16px 0 0;
+  background: rgba(255, 255, 255, 0.5);
+}
+
+.ql-container {
+  border-radius: 0 0 16px 16px;
+}
+
+.ql-editor {
+  min-height: 150px;
+  font-size: 0.95rem;
+}
+```
+
+**디자인 일관성**: 기존 UI와 조화로운 둥근 모서리 및 색상
+
+### 11.6 기술적 개선사항
+
+#### 11.6.1 에러 처리 강화
+
+**이미지 업로드 실패 처리**:
+```python
+try:
+    confluence_upload_attachment(page_id, file_storage, cfg)
+    return confluence_image_macro
+except Exception as e:
+    print(f"Failed to upload image: {e}")
+    traceback.print_exc()
+    return ''  # 이미지 제외하고 계속 진행
+```
+
+#### 11.6.2 정규식 패턴 개선
+
+**다양한 HTML 형식 처리**:
+```python
+# img 태그 (self-closing 및 일반)
+html = re.sub(r'<img[^>]*src="(data:image/[^"]+)"[^>]*/?>', replace_image, html)
+
+# br 태그 정규화
+html = re.sub(r'<br\s*>', '<br/>', html)
+
+# 빈 paragraph
+html = re.sub(r'<p>\s*<br/?\s*>\s*</p>', '', html)
+```
+
+### 11.7 변경된 파일 목록
+
+**Frontend**:
+- `templates/index.html`
+  - Quill.js CDN 추가
+  - textarea → Quill 에디터 교체
+  - 이미지 압축 JavaScript 추가
+  - 폼 제출 시 HTML 변환 로직
+  - "새 제목" 필드 제거
+
+**Backend**:
+- `backend.py`
+  - `upload_base64_image_to_confluence()` 함수 추가
+  - `sanitize_html_for_confluence()` 함수 개선
+  - 폰트 크기 클래스 → 인라인 스타일 변환
+  - 스마트 콘텐츠 삽입 위치 로직
+
+**Styling**:
+- `static/styles.css`
+  - Quill 에디터 커스텀 스타일
+  - 폰트 크기 스타일 정의
+
+### 11.8 사용자 워크플로우
+
+**새로운 콘텐츠 추가 프로세스**:
+```
+1. Confluence 페이지 검색 및 선택
+   ↓
+2. Quill 에디터에서 내용 작성
+   - 텍스트 서식 적용 (굵게, 기울임, 크기 조정)
+   - 이미지 붙여넣기 (Ctrl+V) 또는 파일 선택
+   - 리스트 작성
+   ↓
+3. "Confluence 내용 추가" 버튼 클릭
+   ↓
+4. 자동 처리
+   - 이미지 압축 (800x600, 70%)
+   - Base64 → Confluence 첨부 파일 변환
+   - 폰트 크기 클래스 → 인라인 스타일
+   - HTML → XHTML 변환
+   ↓
+5. Confluence 페이지 업데이트
+   - [Software Release Note] 아래에 삽입
+   - 타임스탬프 자동 추가
+   - 이미지 정상 표시
+```
+
+### 11.9 성능 및 제한사항
+
+**이미지 압축**:
+- 장점: 전송 크기 감소, 서버 부하 감소
+- 제한: 매우 고해상도 이미지는 품질 저하 가능
+
+**Base64 vs 첨부 파일**:
+- Base64 인코딩: 원본 크기의 133%
+- 첨부 파일 변환: 추가 API 호출 필요
+- 선택: 첨부 파일 방식 (페이지 크기 최소화)
+
+**브라우저 호환성**:
+- Quill.js: 모던 브라우저 지원 (IE11 이상)
+- Canvas API: 이미지 압축에 필요
+- FileReader API: Base64 변환에 필요
+
+### 11.10 배포 및 업그레이드
+
+**변경 사항**:
+- 외부 의존성: Quill.js CDN (인터넷 연결 필요)
+- 환경 변수: 변경 없음
+- 데이터베이스: 변경 없음
+
+**업그레이드 방법**:
+1. 최신 코드 pull
+2. 서버 재시작
+3. 브라우저 캐시 클리어 (Ctrl+F5)
+4. Quill 에디터 확인
+
+**호환성**:
+- 기존 Jira 기능: 영향 없음
+- 기존 Confluence 파일 업로드: 영향 없음
+- 기존 페이지 검색: 영향 없음
+
+### 11.11 향후 개선 가능 사항
+
+**고려 중인 기능**:
+- [ ] 이미지 크기 조정 (드래그로 리사이즈)
+- [ ] 테이블 삽입 기능
+- [ ] 코드 블록 하이라이팅
+- [ ] 링크 삽입 기능
+- [ ] 색상 선택 기능
+- [ ] 실시간 미리보기
+
+**기술적 개선**:
+- [ ] 이미지 업로드 진행률 표시
+- [ ] 오프라인 모드 지원 (LocalStorage)
+- [ ] 자동 저장 기능
+- [ ] 버전 히스토리
+
+---
+
+---
+
+## 12. v1.3.1 개선사항 (2026-04-08)
+
+### 12.1 파일 첨부 및 다운로드 기능 구현
+
+#### 12.1.1 Quill 에디터 파일 첨부 버튼 (📎)
+
+**구현 내용**:
+- Quill 툴바에 📎(클립) 파일 첨부 버튼 추가
+- 여러 파일 동시 선택 가능
+- 에디터에 파일 정보 자동 삽입: `📎 파일명.ext (123.45 KB)`
+- JavaScript `attachedFiles` 배열로 파일 관리
+- FormData를 통한 파일 + 텍스트 동시 전송 (fetch API)
+
+**에디터 표시 형식**:
+```
+📎 RE RE KGM 전방카메라 고장진단 검출 조건 사양 검토 건 (SIW ESC 진단시 ADAS 경고등 미점등) (1).msg (400.50 KB)
+```
+
+#### 12.1.2 Confluence 페이지 내 클릭 가능한 다운로드 링크
+
+**구현 방식**: Confluence REST API에서 실제 다운로드 URL을 수집하여 `<a href>` 링크 생성
+
+**처리 흐름**:
+```
+1. 파일 먼저 Confluence에 업로드
+   POST /rest/api/content/{page_id}/child/attachment
+   ↓
+2. 첨부 파일 목록 API 조회
+   GET /rest/api/content/{page_id}/child/attachment?limit=50
+   ↓
+3. 각 첨부 파일의 다운로드 URL 수집
+   attachment['_links']['download']
+   예: /download/attachments/411546983/filename.pptx?version=1&modificationDate=...&api=v2
+   ↓
+4. 에디터 텍스트의 파일명과 퍼지 매칭
+   ↓
+5. 매칭된 URL로 <a href="..."> 링크 생성 (& → &amp; 이스케이프)
+   ↓
+6. Confluence 페이지에 클릭 가능한 다운로드 링크 표시 ✅
+```
+
+#### 12.1.3 퍼지 파일명 매칭 (핵심 해결책)
+
+**문제**: Confluence가 파일 업로드 시 한글 등 비-ASCII 문자를 제거하여 파일명이 변경됨
+
+```
+원본: 260403_주간업무_Design2팀.pptx
+Confluence: 260403__Design2.pptx          ← 한글 '주간업무', '팀' 제거
+
+원본: RE RE KGM 전방카메라 고장진단 검출 조건 사양 검토 건 (SIW ESC 진단시 ADAS 경고등 미점등) (1).msg
+Confluence: RE_RE_KGM_SIW_ESC_ADAS__1.msg  ← 한글 전부 제거
+```
+
+**해결**: 정규화 기반 퍼지 매칭 함수
+```python
+def normalize_filename(name):
+    # 1. 비-ASCII 문자 제거 (한글 등)
+    name = re.sub(r'[^\x00-\x7F]', '', name)
+    # 2. 영숫자, 마침표 외 모든 문자를 _로 치환
+    name = re.sub(r'[^a-zA-Z0-9.]', '_', name)
+    # 3. 연속 _ 제거
+    name = re.sub(r'_+', '_', name)
+    # 4. 마침표 앞뒤 _ 제거 (1_.msg → 1.msg)
+    name = re.sub(r'_\.', '.', name)
+    name = re.sub(r'\._', '.', name)
+    return name.strip('_').lower()
+```
+
+**매칭 결과**:
+```
+260403_주간업무_Design2팀.pptx  →  260403_design2.pptx  ✅ MATCH
+260403__Design2.pptx           →  260403_design2.pptx  ✅
+
+RE RE KGM 전방카메라...(1).msg →  re_re_kgm_siw_esc_adas_1.msg  ✅ MATCH
+RE_RE_KGM_SIW_ESC_ADAS__1.msg →  re_re_kgm_siw_esc_adas_1.msg  ✅
+```
+
+#### 12.1.4 XHTML 호환성 처리
+
+**문제**: Confluence 다운로드 URL에 `&` 문자가 포함되어 XHTML 파싱 오류 발생
+```
+?version=1&modificationDate=...&api=v2   ← XHTML에서 & 는 유효하지 않음
+```
+
+**해결**: `&` → `&amp;` 이스케이프
+```python
+safe_url = download_url.replace('&', '&amp;')
+```
+
+**Confluence 페이지 저장 형식**:
+```html
+<p><strong>📎 첨부: <a href="https://confluence.hlklemove.com/download/attachments/411546983/
+260403__Design2.pptx?version=1&amp;modificationDate=1775629213881&amp;api=v2">
+260403_주간업무_Design2팀.pptx</a></strong> (161.23 KB)</p>
+```
+
+### 12.2 UI 개선
+
+#### 12.2.1 별도 파일 업로드 폼 제거
+
+**변경 사항**:
+- "Confluence 파일 업로드" 별도 섹션 제거 (`/confluence/upload` 폼)
+- 파일 첨부는 Quill 에디터의 📎 버튼으로 통합
+- 텍스트 + 파일을 하나의 폼에서 동시 처리
+
+**Before**:
+```
+[Confluence 내용 추가] 폼 + [Confluence 파일 업로드] 폼 (별도)
+```
+
+**After**:
+```
+[Confluence 내용 추가] 폼 (📎 파일 첨부 통합)
+```
+
+### 12.3 기술적 개선사항
+
+#### 12.3.1 파일 업로드 순서 변경
+
+**Before (문제)**:
+```
+1. confluence_update_page() 호출 → HTML에 파일 링크 삽입
+2. 파일 업로드 → Confluence에 첨부
+→ 문제: 링크 생성 시점에 다운로드 URL을 모름
+```
+
+**After (해결)**:
+```
+1. 파일 먼저 업로드 → Confluence 첨부
+2. 첨부 파일 목록 API 조회 → 다운로드 URL 수집
+3. confluence_update_page() 호출 → 정확한 URL로 링크 생성
+```
+
+#### 12.3.2 시도한 접근법 및 최종 선택
+
+| 접근법 | 결과 | 문제점 |
+|--------|------|--------|
+| Flask 프록시 다운로드 | ❌ 404 | Confluence 다운로드 URL에 version 파라미터 필요 |
+| ac:link 네이티브 링크 | ❌ 클릭 가능하나 안 열림 | Confluence 미리보기로 동작 |
+| 직접 URL 구성 | ❌ 404 | 한글 파일명 인코딩 깨짐 |
+| **API 다운로드 URL + 퍼지 매칭** | **✅ 성공** | **최종 채택** |
+
+### 12.4 변경된 파일 목록
+
+**Frontend**:
+- `frontend.py`
+  - 파일 업로드 순서 변경 (업로드 → API 조회 → 페이지 업데이트)
+  - 첨부 파일 목록 API 호출 추가 (`requests` 라이브러리 사용)
+  - 디버그 로깅 추가
+
+- `templates/index.html`
+  - Quill 에디터 📎 파일 첨부 버튼 추가
+  - FormData를 통한 파일 전송 JavaScript
+  - 별도 파일 업로드 폼 제거
+
+**Backend**:
+- `backend.py`
+  - `sanitize_html_for_confluence()`: `file_download_links` 파라미터 추가
+  - `normalize_filename()`: 퍼지 파일명 매칭 함수 추가
+  - `confluence_update_page()`: `file_download_links` 파라미터 추가
+  - XHTML `&amp;` 이스케이프 처리
+
+**Dependencies**:
+- `requirements.txt`: `requests` 라이브러리 추가
+
+### 12.5 배포 및 업그레이드
+
+**변경 사항**:
+- `requests` 라이브러리 설치 필요: `pip install requests`
+- 환경 변수: 변경 없음
+- 기존 기능 호환성: 완전 유지
+
+**업그레이드 방법**:
+1. `pip install -r requirements.txt`
+2. 서버 재시작
+3. 브라우저 캐시 클리어 (Ctrl+F5)
+
+---
+
+**문서 버전**: v1.3.1  
 **최종 수정일**: 2026-04-08  
 **작성자**: backas-D  
 **문서 상태**: 실제 구현 기반 완료

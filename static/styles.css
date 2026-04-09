@@ -89,6 +89,12 @@ input, textarea {
   background: var(--paper-strong);
   color: var(--text);
 }
+input:disabled {
+  background: rgba(243, 239, 231, 0.5);
+  color: var(--muted);
+  cursor: not-allowed;
+  font-weight: 500;
+}
 textarea { resize: vertical; }
 button {
   border: 0;
@@ -99,18 +105,58 @@ button {
   font-weight: 700;
   cursor: pointer;
 }
+
+.secondary-btn {
+  background: var(--paper-strong);
+  color: var(--text);
+  border: 1px solid var(--line);
+  transition: all 0.2s ease;
+}
+
+.secondary-btn:hover {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+}
 .tree, .tree ul { list-style: none; padding-left: 16px; }
 .tree { padding-left: 0; }
 .tree li { margin: 8px 0; }
 .tree a, .issue-card { color: var(--text); text-decoration: none; }
-.issue-list, .activity-list { display: grid; gap: 12px; }
-.issue-card, .activity-item {
+.tree a.tree-node {
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 8px;
+  display: inline-block;
+  transition: background-color 0.2s ease;
+}
+.tree a.tree-node:hover {
+  background-color: rgba(13, 108, 116, 0.08);
+}
+.tree a .page-id {
+  margin-left: 8px;
+  font-size: 0.85em;
+  color: var(--muted);
+  font-weight: 500;
+  font-family: 'Courier New', monospace;
+}
+.issue-list, .activity-list { display: grid; gap: 0; }
+.issue-card {
   display: grid;
   gap: 4px;
   padding: 16px;
   border-radius: 18px;
   border: 1px solid var(--line);
   background: rgba(255, 255, 255, 0.7);
+}
+.activity-item {
+  display: grid;
+  gap: 4px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+}
+.activity-item:last-child {
+  border-bottom: none;
 }
 .flash {
   border-radius: 18px;
@@ -533,6 +579,60 @@ button {
   padding: 40px 20px;
   color: var(--muted);
   font-size: 0.95rem;
+}
+
+/* Quill Editor Styles */
+#quill_editor {
+  background: var(--paper-strong);
+  border-radius: 16px;
+}
+
+.ql-toolbar {
+  border-radius: 16px 16px 0 0;
+  border: 1px solid rgba(29, 42, 56, 0.14);
+  background: rgba(255, 255, 255, 0.5);
+}
+
+.ql-container {
+  border-radius: 0 0 16px 16px;
+  border: 1px solid rgba(29, 42, 56, 0.14);
+  border-top: none;
+  font-family: inherit;
+}
+
+.ql-editor {
+  min-height: 150px;
+  font-size: 0.95rem;
+  color: var(--text);
+}
+
+.ql-editor.ql-blank::before {
+  color: var(--muted);
+  font-style: normal;
+  opacity: 0.6;
+}
+
+/* Quill Font Size Styles */
+.ql-editor .ql-size-small {
+  font-size: 0.75em;
+}
+
+.ql-editor .ql-size-large {
+  font-size: 1.5em;
+}
+
+.ql-editor .ql-size-huge {
+  font-size: 2em;
+}
+
+/* Quill File Button Icon */
+.ql-toolbar .ql-file::before {
+  content: "📎";
+  font-size: 1.2em;
+}
+
+.ql-toolbar .ql-file {
+  width: auto !important;
 }
 
 .error {

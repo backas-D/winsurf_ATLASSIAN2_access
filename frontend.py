@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from flask import Blueprint, jsonify, render_template, request, session
+from flask import Blueprint, jsonify, render_template, request, session, Response
 
 from backend import (
     SearchState,
@@ -16,7 +16,6 @@ from backend import (
     find_related_projects,
     generate_training_engine,
     get_oem_projects,
-    get_recent_activity,
     jira_create_issue,
     jira_update_issue,
     load_config,
@@ -37,7 +36,6 @@ def render(state: SearchState):
     return render_template(
         "index.html",
         state=state,
-        recent_activity=get_recent_activity(),
         mcp_preview=export_mcp_config(cfg),
     )
 
@@ -170,16 +168,69 @@ def update_confluence():
     cfg = load_config()
     state.project_name = (request.form.get("project_name") or "").strip()
     page_id = (request.form.get("confluence_page_id") or "").strip()
+    
+    if not page_id:
+        state.flash_error = "페이지를 선택해주세요."
+        return render(state)
+    
     try:
+        import requests as req_lib
+        from backend import auth_headers
+        
+        # 디버깅: 수신된 데이터 확인
+        print(f"=== DEBUG: request.files keys: {list(request.files.keys())}")
+        print(f"=== DEBUG: request.form keys: {list(request.form.keys())}")
+        print(f"=== DEBUG: content_type: {request.content_type}")
+        
+        # 1. 파일을 먼저 업로드
+        files = request.files.getlist('files')
+        valid_files = [f for f in files if f and f.filename]
+        print(f"=== DEBUG: files count: {len(files)}, valid: {len(valid_files)}")
+        uploaded_filenames = []
+        
+        for file in valid_files:
+            try:
+                confluence_upload_attachment(page_id, file, cfg)
+                uploaded_filenames.append(file.filename)
+                print(f"Uploaded: {file.filename}")
+            except Exception as upload_exc:
+                print(f"File upload failed for {file.filename}: {upload_exc}")
+        
+        # 2. 항상 첨부 파일 목록 조회 (신규 업로드 여부와 무관하게)
+        #    에디터에 파일 텍스트가 있으면 기존 첨부에서도 URL을 찾아 링크 생성
+        file_download_links = {}
+        try:
+            att_url = f"{cfg.confluence_base_url}/rest/api/content/{page_id}/child/attachment?limit=50"
+            att_resp = req_lib.get(att_url, headers=auth_headers(cfg.confluence_pat), timeout=10)
+            att_resp.raise_for_status()
+            for att in att_resp.json().get('results', []):
+                title = att.get('title', '')
+                dl_link = att.get('_links', {}).get('download', '')
+                if title and dl_link:
+                    full_url = f"{cfg.confluence_base_url}{dl_link}"
+                    file_download_links[title] = full_url
+                    print(f"Attachment URL: {title} → {full_url}")
+        except Exception as att_exc:
+            print(f"Attachment list failed: {att_exc}")
+        
+        # 3. 수집된 다운로드 링크와 함께 페이지 업데이트
         confluence_update_page(
             page_id=page_id,
             append_text=(request.form.get("confluence_append_text") or "").strip(),
             title=(request.form.get("confluence_title") or "").strip(),
             cfg=cfg,
+            file_download_links=file_download_links if file_download_links else None,
         )
-        state.confluence_tree = find_confluence_pages(state.project_name, cfg)
+        
+        # Only reload tree if project_name is provided
+        if state.project_name:
+            state.confluence_tree = find_confluence_pages(state.project_name, cfg)
         state.selected_confluence_page_id = page_id
-        state.flash_success = "Confluence 페이지 수정이 완료되었습니다."
+        
+        if valid_files:
+            state.flash_success = f"Confluence 페이지 수정 및 파일 {len(valid_files)}개 업로드가 완료되었습니다."
+        else:
+            state.flash_success = "Confluence 페이지 수정이 완료되었습니다."
     except Exception as exc:
         state.flash_error = str(exc)
     return render(state)
@@ -192,11 +243,18 @@ def upload_confluence():
     state.project_name = (request.form.get("project_name") or "").strip()
     page_id = (request.form.get("confluence_upload_page_id") or "").strip()
     upload = request.files.get("confluence_file")
+    
+    if not page_id:
+        state.flash_error = "페이지를 선택해주세요."
+        return render(state)
+    
     try:
         if upload is None or not upload.filename:
             raise ValueError("업로드할 파일을 선택해 주세요.")
         confluence_upload_attachment(page_id, upload, cfg)
-        state.confluence_tree = find_confluence_pages(state.project_name, cfg)
+        # Only reload tree if project_name is provided
+        if state.project_name:
+            state.confluence_tree = find_confluence_pages(state.project_name, cfg)
         state.selected_confluence_page_id = page_id
         state.flash_success = "Confluence 첨부 업로드가 완료되었습니다."
     except Exception as exc:
@@ -340,3 +398,70 @@ def load_project_tree():
         
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
+
+
+@frontend_bp.get("/confluence/download/<page_id>/<path:filename>")
+def download_confluence_file(page_id: str, filename: str):
+    """Confluence 첨부 파일 다운로드 프록시"""
+    import requests
+    from urllib.parse import quote, unquote
+    from backend import auth_headers
+    
+    cfg = load_config()
+    
+    try:
+        print(f"Requested filename: {filename}")  # 디버깅용
+        
+        # 먼저 페이지의 첨부 파일 목록을 가져와서 정확한 파일명 찾기
+        attachments_url = f"{cfg.confluence_base_url}/rest/api/content/{page_id}/child/attachment"
+        attachments_response = requests.get(
+            attachments_url,
+            headers=auth_headers(cfg.confluence_pat),
+            timeout=10
+        )
+        attachments_response.raise_for_status()
+        attachments_data = attachments_response.json()
+        
+        # 요청된 파일명과 일치하는 첨부 파일 찾기
+        target_attachment = None
+        for attachment in attachments_data.get('results', []):
+            if attachment['title'] == filename:
+                target_attachment = attachment
+                break
+        
+        if not target_attachment:
+            return f"파일을 찾을 수 없습니다: {filename}", 404
+        
+        # 첨부 파일의 다운로드 링크 사용
+        download_link = target_attachment['_links']['download']
+        download_url = f"{cfg.confluence_base_url}{download_link}"
+        
+        print(f"Downloading from: {download_url}")  # 디버깅용
+        
+        # Confluence에서 파일 가져오기
+        response = requests.get(
+            download_url,
+            headers=auth_headers(cfg.confluence_pat),
+            stream=True,
+            timeout=30
+        )
+        
+        print(f"Response status: {response.status_code}")  # 디버깅용
+        response.raise_for_status()
+        
+        # 파일명을 UTF-8로 인코딩
+        encoded_filename = quote(filename, safe='')
+        
+        # 파일 다운로드 응답 생성
+        return Response(
+            response.iter_content(chunk_size=8192),
+            content_type=response.headers.get('Content-Type', 'application/octet-stream'),
+            headers={
+                'Content-Disposition': f'attachment; filename*=UTF-8\'\'{encoded_filename}'
+            }
+        )
+    except Exception as e:
+        print(f"Download error: {str(e)}")  # 디버깅용
+        import traceback
+        traceback.print_exc()
+        return f"파일 다운로드 실패: {str(e)}", 500

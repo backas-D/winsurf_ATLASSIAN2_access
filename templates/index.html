@@ -8,6 +8,8 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=Newsreader:opsz,wght@6..72,500;6..72,700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+  <link href="https://cdn.quilljs.com/1.3.6/quill.snow.css" rel="stylesheet">
+  <script src="https://cdn.quilljs.com/1.3.6/quill.js"></script>
 </head>
 <body>
   <div class="page-shell">
@@ -40,6 +42,12 @@
         <button type="submit">Jira 이슈 검색</button>
       </form>
 
+      <div class="stack">
+        <button type="button" onclick="showActivityModal()" class="secondary-btn">
+          📋 최근 작업 기록
+        </button>
+      </div>
+
       <div class="mcp-card">
         <p class="card-label">MCP Preview</p>
         <pre>{{ mcp_preview | tojson(indent=2) }}</pre>
@@ -70,7 +78,10 @@
             {% if state.confluence_tree %}
               {% macro render_node(node) %}
                 <li>
-                  <a href="{{ node.url }}" target="_blank" rel="noreferrer">{{ node.title }}</a>
+                  <a href="{{ node.url }}" target="_blank" rel="noreferrer" class="tree-node" data-page-id="{{ node.id }}">
+                    {{ node.title }}
+                    <span class="page-id">[{{ node.id }}]</span>
+                  </a>
                   {% if node.children %}
                     <ul>
                       {% for child in node.children %}
@@ -119,25 +130,18 @@
             <p>페이지 본문을 추가하거나 첨부 파일을 올립니다.</p>
           </div>
 
-          <form class="stack" method="post" action="/confluence/update">
+          <form class="stack" method="post" action="/confluence/update" id="confluence_update_form">
             <input type="hidden" name="project_name" value="{{ state.project_name }}">
-            <label for="confluence_page_id">Page ID</label>
-            <input id="confluence_page_id" name="confluence_page_id" value="{{ state.selected_confluence_page_id }}" placeholder="Confluence pageId">
-            <label for="confluence_title">새 제목(선택)</label>
-            <input id="confluence_title" name="confluence_title" placeholder="제목을 바꾸지 않으려면 비워두세요">
-            <label for="confluence_append_text">추가할 내용</label>
-            <textarea id="confluence_append_text" name="confluence_append_text" rows="5" placeholder="본문 끝에 덧붙일 내용을 입력하세요"></textarea>
+            <input type="hidden" id="confluence_page_id" name="confluence_page_id" value="{{ state.selected_confluence_page_id }}">
+            <input type="hidden" name="confluence_title" value="">
+            <label for="confluence_selected_page">선택된 페이지</label>
+            <input id="confluence_selected_page" type="text" disabled placeholder="트리에서 페이지를 선택하세요">
+            <label for="quill_editor">추가할 내용</label>
+            <div id="quill_editor" style="height: 200px;"></div>
+            <input type="hidden" id="confluence_append_text" name="confluence_append_text">
             <button type="submit">Confluence 내용 추가</button>
           </form>
 
-          <form class="stack" method="post" action="/confluence/upload" enctype="multipart/form-data">
-            <input type="hidden" name="project_name" value="{{ state.project_name }}">
-            <label for="confluence_upload_page_id">업로드 대상 Page ID</label>
-            <input id="confluence_upload_page_id" name="confluence_upload_page_id" value="{{ state.selected_confluence_page_id }}">
-            <label for="confluence_file">첨부 파일</label>
-            <input id="confluence_file" type="file" name="confluence_file">
-            <button type="submit">Confluence 파일 업로드</button>
-          </form>
         </article>
 
         <article class="panel">
@@ -172,27 +176,6 @@
         </article>
       </section>
 
-      <section class="workspace-grid">
-        <article class="panel">
-          <div class="panel-head">
-            <h3>최근 작업 기록</h3>
-            <p>SQLite에 저장된 최근 작업 로그입니다.</p>
-          </div>
-          <div class="activity-list">
-            {% if recent_activity %}
-              {% for item in recent_activity %}
-                <div class="activity-item">
-                  <strong>{{ item.action_type }} · {{ item.target_type }}</strong>
-                  <span>{{ item.target_key }}</span>
-                  <small>{{ item.created_at }}</small>
-                </div>
-              {% endfor %}
-            {% else %}
-              <p class="empty">아직 기록이 없습니다.</p>
-            {% endif %}
-          </div>
-        </article>
-      </section>
 
       <section class="chat-section">
         <article class="panel chat-panel">
@@ -405,6 +388,282 @@
   </script>
 
   <script>
+    // Tree node click handler to copy Page ID and display page title
+    document.addEventListener('DOMContentLoaded', function() {
+      const treeNodes = document.querySelectorAll('.tree-node');
+      const confluencePageIdInput = document.getElementById('confluence_page_id');
+      const confluenceUploadPageIdInput = document.getElementById('confluence_upload_page_id');
+      const confluenceSelectedPageInput = document.getElementById('confluence_selected_page');
+      const confluenceUploadSelectedPageInput = document.getElementById('confluence_upload_selected_page');
+      
+      treeNodes.forEach(node => {
+        node.addEventListener('click', function(e) {
+          // Only prevent default if not opening in new tab (middle click or ctrl+click)
+          if (!e.ctrlKey && !e.metaKey && e.button !== 1) {
+            const pageId = this.getAttribute('data-page-id');
+            // Get page title (text content without the page ID part)
+            const fullText = this.textContent.trim();
+            const pageTitle = fullText.replace(/\s*\[\d+\]\s*$/, '').trim();
+            
+            if (pageId) {
+              // Copy Page ID to hidden fields
+              if (confluencePageIdInput) {
+                confluencePageIdInput.value = pageId;
+              }
+              if (confluenceUploadPageIdInput) {
+                confluenceUploadPageIdInput.value = pageId;
+              }
+              
+              // Display page title in disabled fields
+              const displayText = `${pageTitle} [${pageId}]`;
+              if (confluenceSelectedPageInput) {
+                confluenceSelectedPageInput.value = displayText;
+              }
+              if (confluenceUploadSelectedPageInput) {
+                confluenceUploadSelectedPageInput.value = displayText;
+              }
+              
+              // Visual feedback
+              this.style.backgroundColor = 'rgba(13, 108, 116, 0.1)';
+              setTimeout(() => {
+                this.style.backgroundColor = '';
+              }, 300);
+            }
+          }
+        });
+      });
+    });
+  </script>
+
+  <script>
+    // Quill 에디터 초기화
+    document.addEventListener('DOMContentLoaded', function() {
+      // 커스텀 툴바 컨테이너 생성
+      var toolbarOptions = [
+        [{ 'size': ['small', false, 'large', 'huge'] }],
+        ['bold', 'italic', 'underline'],
+        [{ 'list': 'ordered'}, { 'list': 'bullet' }],
+        ['image', 'file'],  // 파일 버튼 추가
+        ['clean']
+      ];
+      
+      var quill = new Quill('#quill_editor', {
+        theme: 'snow',
+        placeholder: '[Software Release Note] 밑에 작성할 내용을 입력하세요.',
+        modules: {
+          toolbar: {
+            container: toolbarOptions,
+            handlers: {
+              'file': function() {
+                selectFile();
+              }
+            }
+          }
+        }
+      });
+      
+      // 이미지 압축 함수
+      function compressImage(file, maxWidth, maxHeight, quality) {
+        return new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = function(e) {
+            const img = new Image();
+            img.onload = function() {
+              const canvas = document.createElement('canvas');
+              let width = img.width;
+              let height = img.height;
+              
+              // 최대 크기 제한
+              if (width > maxWidth || height > maxHeight) {
+                const ratio = Math.min(maxWidth / width, maxHeight / height);
+                width = width * ratio;
+                height = height * ratio;
+              }
+              
+              canvas.width = width;
+              canvas.height = height;
+              
+              const ctx = canvas.getContext('2d');
+              ctx.drawImage(img, 0, 0, width, height);
+              
+              // JPEG로 압축 (quality: 0.7 = 70% 품질)
+              const compressedDataUrl = canvas.toDataURL('image/jpeg', quality);
+              resolve(compressedDataUrl);
+            };
+            img.onerror = reject;
+            img.src = e.target.result;
+          };
+          reader.onerror = reject;
+          reader.readAsDataURL(file);
+        });
+      }
+      
+      // 툴바 이미지 버튼 핸들러 (압축 적용)
+      quill.getModule('toolbar').addHandler('image', function() {
+        const input = document.createElement('input');
+        input.setAttribute('type', 'file');
+        input.setAttribute('accept', 'image/*');
+        input.click();
+        
+        input.onchange = function() {
+          const file = input.files[0];
+          if (file) {
+            compressImage(file, 800, 600, 0.7)
+              .then(compressedDataUrl => {
+                const range = quill.getSelection(true);
+                quill.insertEmbed(range.index, 'image', compressedDataUrl);
+              })
+              .catch(error => {
+                console.error('이미지 압축 실패:', error);
+                alert('이미지를 삽입할 수 없습니다.');
+              });
+          }
+        };
+      });
+      
+      // 이미지 붙여넣기 처리 (압축 적용)
+      quill.root.addEventListener('paste', function(e) {
+        if (e.clipboardData && e.clipboardData.items) {
+          for (let i = 0; i < e.clipboardData.items.length; i++) {
+            if (e.clipboardData.items[i].type.indexOf('image') !== -1) {
+              e.preventDefault();
+              const blob = e.clipboardData.items[i].getAsFile();
+              
+              // 이미지 압축 (최대 800x600, 품질 70%)
+              compressImage(blob, 800, 600, 0.7)
+                .then(compressedDataUrl => {
+                  const range = quill.getSelection();
+                  if (range) {
+                    quill.insertEmbed(range.index, 'image', compressedDataUrl);
+                  } else {
+                    quill.insertEmbed(0, 'image', compressedDataUrl);
+                  }
+                })
+                .catch(error => {
+                  console.error('이미지 압축 실패:', error);
+                  alert('이미지를 삽입할 수 없습니다.');
+                });
+            }
+          }
+        }
+      });
+      
+      // 첨부 파일 목록 저장
+      var attachedFiles = [];
+      
+      // 파일 선택 함수
+      function selectFile() {
+        const input = document.createElement('input');
+        input.setAttribute('type', 'file');
+        input.setAttribute('multiple', 'multiple');
+        input.click();
+        
+        input.onchange = function() {
+          const files = Array.from(input.files);
+          files.forEach(file => {
+            attachedFiles.push(file);
+            insertFileLink(file);
+          });
+          updateFileList();
+        };
+      }
+      
+      // 에디터에 파일 링크 삽입
+      function insertFileLink(file) {
+        const range = quill.getSelection(true);
+        const fileName = file.name;
+        const fileSize = (file.size / 1024).toFixed(2) + ' KB';
+        
+        // 파일 아이콘과 정보를 HTML로 삽입
+        const fileHtml = `<p>📎 <strong>${fileName}</strong> (${fileSize})</p>`;
+        quill.clipboard.dangerouslyPasteHTML(range.index, fileHtml);
+      }
+      
+      // 파일 목록 업데이트 (에디터 아래에 표시)
+      function updateFileList() {
+        let fileListDiv = document.getElementById('attached_files_list');
+        if (!fileListDiv) {
+          fileListDiv = document.createElement('div');
+          fileListDiv.id = 'attached_files_list';
+          fileListDiv.style.marginTop = '10px';
+          fileListDiv.style.padding = '10px';
+          fileListDiv.style.background = '#f5f5f5';
+          fileListDiv.style.borderRadius = '8px';
+          fileListDiv.style.fontSize = '0.9rem';
+          document.getElementById('quill_editor').parentNode.appendChild(fileListDiv);
+        }
+        
+        if (attachedFiles.length === 0) {
+          fileListDiv.style.display = 'none';
+          return;
+        }
+        
+        fileListDiv.style.display = 'block';
+        fileListDiv.innerHTML = '<strong>첨부 파일:</strong><br>';
+        attachedFiles.forEach((file, index) => {
+          const fileSize = (file.size / 1024).toFixed(2);
+          fileListDiv.innerHTML += `<div style="margin: 5px 0;">
+            📎 ${file.name} (${fileSize} KB)
+            <button type="button" onclick="removeFile(${index})" style="margin-left: 10px; padding: 2px 8px; font-size: 0.8rem;">삭제</button>
+          </div>`;
+        });
+      }
+      
+      // 파일 삭제 함수
+      window.removeFile = function(index) {
+        attachedFiles.splice(index, 1);
+        updateFileList();
+      };
+      
+      // 폼 제출 시 Quill 내용과 파일을 함께 전송
+      const updateForm = document.getElementById('confluence_update_form');
+      if (updateForm) {
+        updateForm.addEventListener('submit', function(e) {
+          const htmlContent = quill.root.innerHTML;
+          
+          // 빈 에디터 체크 (<p><br></p>는 빈 상태)
+          if (htmlContent === '<p><br></p>' || htmlContent.trim() === '') {
+            document.getElementById('confluence_append_text').value = '';
+          } else {
+            document.getElementById('confluence_append_text').value = htmlContent;
+          }
+          
+          // 첨부 파일이 있으면 FormData로 전송
+          if (attachedFiles.length > 0) {
+            e.preventDefault();
+            
+            const formData = new FormData();
+            formData.append('project_name', document.querySelector('input[name="project_name"]').value);
+            formData.append('confluence_page_id', document.getElementById('confluence_page_id').value);
+            formData.append('confluence_title', '');
+            formData.append('confluence_append_text', document.getElementById('confluence_append_text').value);
+            
+            // 모든 파일 추가
+            attachedFiles.forEach((file, index) => {
+              formData.append('files', file);
+            });
+            
+            // AJAX로 전송
+            fetch('/confluence/update', {
+              method: 'POST',
+              body: formData
+            })
+            .then(response => response.text())
+            .then(html => {
+              // 페이지 새로고침 또는 성공 메시지
+              window.location.reload();
+            })
+            .catch(error => {
+              console.error('Error:', error);
+              alert('업로드 중 오류가 발생했습니다.');
+            });
+          }
+        });
+      }
+    });
+  </script>
+
+  <script>
     const chatMessages = document.getElementById('chatMessages');
     const chatInput = document.getElementById('chatInput');
     const sendChatBtn = document.getElementById('sendChatBtn');
@@ -534,6 +793,64 @@
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
         sendMessage();
+      }
+    });
+  </script>
+
+  <!-- Activity Log Modal -->
+  <div id="activityModal" class="modal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>📋 최근 작업 기록</h3>
+        <button class="modal-close" onclick="closeActivityModal()">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div id="activityList" class="activity-list">
+          <p class="loading">로딩 중...</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    function showActivityModal() {
+      const modal = document.getElementById('activityModal');
+      modal.style.display = 'flex';
+      loadActivityLog();
+    }
+
+    function closeActivityModal() {
+      document.getElementById('activityModal').style.display = 'none';
+    }
+
+    function loadActivityLog() {
+      fetch('/api/recent-activity?limit=20')
+        .then(response => response.json())
+        .then(data => {
+          const list = document.getElementById('activityList');
+          if (data.activities && data.activities.length > 0) {
+            list.innerHTML = data.activities.map(item => `
+              <div class="activity-item">
+                <strong>${item.action_type} · ${item.target_type}</strong>
+                <span>${item.target_key}</span>
+                <small>${item.created_at}</small>
+              </div>
+            `).join('');
+          } else {
+            list.innerHTML = '<p class="empty">아직 기록이 없습니다.</p>';
+          }
+        })
+        .catch(error => {
+          document.getElementById('activityList').innerHTML = 
+            '<p class="error">로딩 실패: ' + error.message + '</p>';
+        });
+    }
+
+    // 모달 외부 클릭 시 닫기
+    window.addEventListener('click', function(event) {
+      const modal = document.getElementById('activityModal');
+      if (event.target === modal) {
+        closeActivityModal();
       }
     });
   </script>
