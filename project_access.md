@@ -1915,7 +1915,151 @@ pip install beautifulsoup4 lxml requests
 
 ---
 
-**문서 버전**: v1.4.0  
+## 14. v1.5.0 개선사항 (2026-04-10)
+
+### 14.1 RQMT 테이블 파일 업로드 및 Confluence 첨부 파일 링크 개선
+
+#### 14.1.1 파일 업로드 기능
+
+**구현 내용**:
+- RQMT 테이블의 "Project Requirement" 셀 클릭 시 파일 선택 다이얼로그 표시
+- 파일 크기 제한: 최대 10MB
+- 허용 확장자: `.xlsx`, `.xls`, `.pdf`, `.docx`, `.doc`
+- 업로드 상태 표시 (주황색 "업로드 대기중" 텍스트)
+- 행 추가 시 파일 자동 업로드 및 Confluence 첨부 파일 링크 생성
+
+#### 14.1.2 Confluence 첨부 파일 링크 생성
+
+**문제**: 파일 업로드 후 Confluence 테이블의 파일 링크 클릭 시 다운로드 안 됨
+
+**원인 분석**:
+1. Confluence Storage Format의 `<ac:link>` 매크로 구조 불완전
+2. 파일명 불일치 (클라이언트 파일명 vs Confluence 정규화된 파일명)
+
+**해결 방법**:
+- 기존 테이블의 파일 링크 구조를 템플릿으로 사용하여 새 링크 생성
+- Confluence API 응답의 `title` 필드에서 실제 파일명 추출
+- 링크 구조 재생성 시 기존 링크의 속성 복사
+
+**코드 구현** (`frontend.py`):
+```python
+# Find existing link template in table
+existing_link_template = None
+for row in table.find_all("tr")[1:]:
+    cells = row.find_all("td")
+    if len(cells) > 1:
+        link = cells[1].find("ac:link")
+        if link:
+            existing_link_template = link
+            break
+
+# Recreate link structure based on template
+if existing_link_template:
+    link = soup.new_tag("ac:link")
+    for attr, value in existing_link_template.attrs.items():
+        link[attr] = value
+    attachment = soup.new_tag("ri:attachment")
+    attachment['ri:filename'] = str(actual_filename)
+    link.append(attachment)
+```
+
+#### 14.1.3 중복 파일 덮어쓰기
+
+**문제**: 같은 파일명으로 업로드 시 "Cannot add a new attachment with same file name" 오류 발생
+
+**해결 방법** (`backend.py`):
+- 기존 첨부 파일 목록에서 정규화된 파일명으로 비교
+- 기존 파일 발견 시 업데이트 URL 사용 (`/child/attachment/{id}/data`)
+- 새 파일인 경우 생성 URL 사용 (`/child/attachment`)
+
+```python
+# Normalized filename comparison
+normalized_upload = file_storage.filename.replace(' ', '_').replace('-', '_')
+normalized_existing = att_title.replace(' ', '_').replace('-', '_')
+if normalized_upload == normalized_existing:
+    existing_attachment_id = att.get('id')
+```
+
+#### 14.1.4 Windows cp949 인코딩 오류 해결
+
+**문제**: Python `print()` 문에 유니코드 특수문자(⚠️, →)를 사용하면 Windows 터미널(cp949)에서 `UnicodeEncodeError` 발생, `except` 블록에서 프론트엔드로 전달됨
+
+**해결**: 유니코드 특수문자를 ASCII 문자로 교체
+- `⚠️` → `[WARNING]`
+- `→` → `->`
+
+### 14.2 셀 내 줄바꿈 개선
+
+#### 14.2.1 Enter 키 동작 변경
+
+**이전 동작**:
+- `Enter`: 다음 셀로 이동
+- `Alt+Enter`: 줄바꿈
+
+**변경된 동작**:
+- `Enter`: 셀 내 줄바꿈 (`document.execCommand('insertLineBreak')`)
+- `Tab`: 다음 셀로 이동
+- `Shift+Tab`: 이전 셀로 이동
+
+**구현** (`templates/index.html`):
+```javascript
+// Enter: Insert line break within cell
+if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey) {
+  e.preventDefault();
+  document.execCommand('insertLineBreak');
+  cell.dispatchEvent(new Event('input', { bubbles: true }));
+  return;
+}
+
+// Tab: Move to next cell
+if (e.key === 'Tab' && !e.shiftKey) {
+  e.preventDefault();
+  // ... move to next cell
+}
+```
+
+### 14.3 Project Requirement 페이지 자동 선택 개선
+
+#### 14.3.1 페이지 매칭 조건 완화
+
+**이전**: `^2\.\s*Project Requirement` (2번만 매칭)
+**변경**: `Project Requirement` (번호에 관계없이 매칭)
+
+- "2. Project Requirement - J150" ✅
+- "3. Project Requirement - A200" ✅
+- "Project Requirement - OV123" ✅
+
+#### 14.3.2 RQMT 선택 페이지 고정
+
+**변경**: Confluence 트리에서 다른 페이지를 클릭해도 "Project Requirement 수정" 섹션의 "선택된 페이지"가 변경되지 않도록 수정
+
+- `autoFillRQMTSection()`에 의해서만 설정
+- 트리 노드 클릭 핸들러에서 RQMT 필드 업데이트 코드 제거
+
+### 14.4 프로젝트 코드 자동 입력
+
+**구현**: 프로젝트 선택 시 트리 루트 노드의 title에서 프로젝트 코드를 추출하여 "프로젝트 코드" 필드에 자동 입력
+
+**예시**: 트리 루트 "J150 [SRR-30]" → 프로젝트 코드 필드에 "J150" 자동 입력
+
+```javascript
+if (treeNodes.length > 0) {
+  const rootTitle = treeNodes[0].textContent.trim().replace(/\s*\[\d+\]\s*$/, '').trim();
+  const projectCode = rootTitle.split(/[\s\[]/)[0];
+  document.getElementById('jira_project_search').value = projectCode;
+}
+```
+
+### 14.5 변경된 파일
+
+- `backend.py`: 첨부 파일 덮어쓰기 로직, 정규화 파일명 비교
+- `frontend.py`: 링크 구조 템플릿 복사, 파일 업로드 개선, 인코딩 오류 수정
+- `templates/index.html`: Enter/Tab 키 동작 변경, 프로젝트 코드 자동 입력, RQMT 페이지 고정, 매칭 조건 완화
+- `static/styles.css`: 파일 업로드 셀 스타일
+
+---
+
+**문서 버전**: v1.5.0  
 **최종 수정일**: 2026-04-10  
 **작성자**: backas-D  
 **문서 상태**: 실제 구현 기반 완료

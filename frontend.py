@@ -112,6 +112,16 @@ def search_jira():
     state.project_name = (request.form.get("project_name") or "").strip()
     state.selected_oem = (request.form.get("oem") or "KGM").strip()
     
+    # Restore confluence tree from hidden field
+    tree_data = (request.form.get("tree_data") or "").strip()
+    if tree_data:
+        try:
+            import json
+            parsed_tree = json.loads(tree_data)
+            state.confluence_tree = [parsed_tree] if isinstance(parsed_tree, dict) else parsed_tree
+        except Exception:
+            pass
+    
     detected_oem = detect_oem_from_project_code(state.project_name)
     if detected_oem:
         state.selected_oem = detected_oem
@@ -545,14 +555,218 @@ def download_confluence_file(page_id: str, filename: str):
         return f"파일 다운로드 실패: {str(e)}", 500
 
 
+@frontend_bp.post("/api/add-table-rows/<page_id>")
+def add_table_rows(page_id: str):
+    """Add rows to Confluence table with file uploads"""
+    import requests
+    from bs4 import BeautifulSoup
+    from backend import auth_headers, confluence_get_page, confluence_upload_attachment
+    
+    cfg = load_config()
+    
+    try:
+        # Get form data (multipart/form-data for file uploads)
+        rows_json = request.form.get('rows')
+        if not rows_json:
+            return jsonify({"success": False, "message": "행 데이터가 없습니다."}), 400
+        
+        import json
+        rows = json.loads(rows_json)
+        
+        if not rows:
+            return jsonify({"success": False, "message": "추가할 행이 없습니다."}), 400
+        
+        # Upload files and collect filenames (overwrite if exists)
+        uploaded_files = {}
+        for i, row_data in enumerate(rows):
+            file_key = f'file_{i}'
+            if file_key in request.files:
+                file = request.files[file_key]
+                if file and file.filename:
+                    # Upload to Confluence (will overwrite if file exists)
+                    result = confluence_upload_attachment(page_id, file, cfg)
+                    actual_filename = result.get('title', file.filename)
+                    uploaded_files[i] = actual_filename  # Use actual filename from Confluence
+                    print(f"Uploaded file: {file.filename} -> Actual: {actual_filename}")
+                    
+                    # Debug: Compare filenames
+                    if file.filename != actual_filename:
+                        print(f"[WARNING] Filename changed during upload!")
+        
+        # Get current page content
+        page = confluence_get_page(page_id, cfg)
+        current_body = page.get("body", {}).get("storage", {}).get("value", "")
+        
+        # Parse HTML with html.parser (xml parser has encoding issues)
+        soup = BeautifulSoup(current_body, "html.parser")
+        
+        # Find the table under "1. Project Requirement"
+        heading = None
+        for h in soup.find_all(['h1', 'h2', 'h3', 'h4', 'p', 'strong']):
+            if 'Project Requirement' in h.get_text():
+                heading = h
+                break
+        
+        if heading:
+            # Find the next table after this heading
+            table = heading.find_next('table')
+        else:
+            table = soup.find('table')
+        
+        if not table:
+            return jsonify({"success": False, "message": "테이블을 찾을 수 없습니다."}), 404
+        
+        # Find an existing file link in the table to use as template
+        existing_link_template = None
+        for row in table.find_all("tr")[1:]:  # Skip header
+            cells = row.find_all("td")
+            if len(cells) > 1:
+                # Check if second cell (requirement) has a file link
+                link = cells[1].find("ac:link")
+                if link:
+                    existing_link_template = link
+                    print(f"Found existing link structure: {str(link)[:200]}")
+                    break
+        
+        if not existing_link_template:
+            print("No existing link found, will use manual structure")
+        
+        # Find tbody or create if not exists
+        tbody = table.find("tbody")
+        if not tbody:
+            tbody = soup.new_tag("tbody")
+            table.append(tbody)
+        
+        # Add new rows to table
+        for i, row_data in enumerate(rows):
+            tr = soup.new_tag("tr")
+            
+            # Use uploaded filename if available
+            requirement_value = uploaded_files.get(i, row_data.get('requirement', ''))
+            
+            # Create 7 cells only (exclude delete button column)
+            # Confluence table structure: ##, Project Requirement, Phase, Revision, Date, Author, Comment
+            cells = [
+                row_data.get('number', ''),
+                requirement_value,  # Use uploaded filename
+                row_data.get('phase', ''),
+                row_data.get('revision', ''),
+                row_data.get('date', ''),
+                row_data.get('author', ''),
+                row_data.get('comment', '')
+            ]
+            
+            for j, cell_value in enumerate(cells):
+                td = soup.new_tag("td")
+                
+                # For requirement column with uploaded file, create Confluence attachment link
+                if j == 1 and i in uploaded_files:
+                    # Use actual filename from Confluence
+                    actual_filename = uploaded_files[i]
+                    print(f"Creating Confluence link for row {i}: {actual_filename}")
+                    
+                    if existing_link_template:
+                        # Recreate link structure based on existing template
+                        # Get the structure from existing link
+                        existing_attachment = existing_link_template.find("ri:attachment")
+                        existing_link_body = existing_link_template.find("ac:plain-text-link-body")
+                        
+                        # Create new link with same structure
+                        link = soup.new_tag("ac:link")
+                        
+                        # Copy all attributes from existing link
+                        for attr, value in existing_link_template.attrs.items():
+                            link[attr] = value
+                        
+                        # Create attachment tag with same attributes as existing
+                        attachment = soup.new_tag("ri:attachment")
+                        if existing_attachment:
+                            for attr, value in existing_attachment.attrs.items():
+                                if attr != 'ri:filename':  # Skip filename, we'll set it new
+                                    attachment[attr] = value
+                        attachment['ri:filename'] = str(actual_filename)
+                        link.append(attachment)
+                        
+                        # Add link body if existing template has it
+                        if existing_link_body:
+                            link_body = soup.new_tag("ac:plain-text-link-body")
+                            for attr, value in existing_link_body.attrs.items():
+                                link_body[attr] = value
+                            link_body.string = str(actual_filename)
+                            link.append(link_body)
+                        
+                        print(f"Recreated link structure: {str(link)[:200]}")
+                        td.append(link)
+                    else:
+                        # Fallback: create minimal link structure
+                        print("Using fallback minimal link structure")
+                        link = soup.new_tag("ac:link")
+                        attachment = soup.new_tag("ri:attachment")
+                        attachment['ri:filename'] = str(actual_filename)
+                        link.append(attachment)
+                        td.append(link)
+                else:
+                    # Handle multiline content
+                    if '\n' in str(cell_value):
+                        lines = str(cell_value).split('\n')
+                        for k, line in enumerate(lines):
+                            if k > 0:
+                                td.append(soup.new_tag("br"))
+                            td.append(line)
+                    else:
+                        td.string = str(cell_value) if cell_value else ''
+                
+                tr.append(td)
+            
+            tbody.append(tr)
+        
+        # Update page (use decode to avoid cp949 encoding issues on Windows)
+        try:
+            new_body = soup.decode()
+        except:
+            # Fallback: encode to bytes then decode as UTF-8
+            new_body = soup.encode('utf-8', errors='ignore').decode('utf-8')
+        next_version = int(page.get("version", {}).get("number", 1)) + 1
+        
+        update_payload = {
+            "id": page_id,
+            "type": "page",
+            "title": page.get("title", ""),
+            "space": {"key": page.get("space", {}).get("key", "")},
+            "version": {"number": next_version},
+            "body": {"storage": {"value": new_body, "representation": "storage"}}
+        }
+        
+        url = f"{cfg.confluence_base_url}/rest/api/content/{page_id}"
+        headers = auth_headers(cfg.confluence_pat)
+        headers["Content-Type"] = "application/json"
+        
+        resp = requests.put(url, headers=headers, json=update_payload, timeout=30)
+        resp.raise_for_status()
+        
+        return jsonify({
+            "success": True,
+            "message": f"{len(rows)}개 행이 추가되었습니다.",
+            "added_count": len(rows),
+            "uploaded_files": len(uploaded_files)
+        })
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
 @frontend_bp.get("/api/fetch-rqmt-table/<page_id>")
 def fetch_rqmt_table(page_id: str):
     """Fetch and parse table from Confluence RQMT page"""
     import requests
+    import os
     from bs4 import BeautifulSoup
     from backend import auth_headers
     
     cfg = load_config()
+    DEBUG_RQMT = os.getenv("DEBUG_RQMT", "false").lower() == "true"
     
     try:
         url = f"{cfg.confluence_base_url}/rest/api/content/{page_id}?expand=body.storage"
@@ -568,27 +782,92 @@ def fetch_rqmt_table(page_id: str):
         if not raw_html:
             return jsonify({"success": False, "message": "페이지 내용이 없습니다."}), 404
         
+        # Debug: Save raw HTML
+        if DEBUG_RQMT:
+            os.makedirs("logs", exist_ok=True)
+            with open("logs/rqmt_table_debug.html", "w", encoding="utf-8") as f:
+                f.write(raw_html)
+            print(f"[DEBUG] Raw HTML saved to logs/rqmt_table_debug.html")
+        
         soup = BeautifulSoup(raw_html, "html.parser")
         table = soup.find("table")
         
         if not table:
             return jsonify({"success": False, "message": "테이블을 찾을 수 없습니다."}), 404
         
+        def safe_get_text(element, method="default"):
+            """Safely extract text from element with encoding error handling"""
+            try:
+                if method == "link":
+                    # Check for Confluence attachment macro
+                    attachment = element.find("ri:attachment")
+                    if attachment and attachment.get("ri:filename"):
+                        return attachment.get("ri:filename")
+                    
+                    # Check for regular link
+                    link = element.find("a")
+                    if link:
+                        return link.get_text(separator=" ", strip=True)
+                elif method == "time":
+                    time_tag = element.find("time")
+                    if time_tag:
+                        # Get datetime attribute first, fallback to text
+                        dt = time_tag.get("datetime")
+                        if dt:
+                            return dt
+                        return time_tag.get_text(separator=" ", strip=True)
+                
+                # Default: use separator for nested elements
+                return element.get_text(separator=" ", strip=True)
+            except Exception as e:
+                if DEBUG_RQMT:
+                    print(f"[ERROR] Text extraction failed: {e}")
+                # Fallback: try to get any text content
+                try:
+                    return str(element.string or "").strip()
+                except:
+                    return ""
+        
         # Parse headers
         headers_row = table.find("tr")
         headers = []
         if headers_row:
             for th in headers_row.find_all(["th", "td"]):
-                headers.append(th.get_text(strip=True))
+                headers.append(safe_get_text(th))
         
-        # Parse rows
+        # Parse rows with improved text extraction
         rows = []
-        for tr in table.find_all("tr")[1:]:  # Skip header row
+        for row_idx, tr in enumerate(table.find_all("tr")[1:]):  # Skip header row
             cells = []
-            for td in tr.find_all("td"):
-                cells.append(td.get_text(strip=True))
+            for cell_idx, td in enumerate(tr.find_all("td")):
+                # Debug: Log cell structure
+                if DEBUG_RQMT and row_idx < 3:  # Only first 3 rows
+                    try:
+                        print(f"\n=== Row {row_idx}, Cell {cell_idx} ===")
+                        print(f"HTML preview: {str(td)[:200]}...")
+                    except:
+                        print(f"\n=== Row {row_idx}, Cell {cell_idx} === (HTML print failed)")
+                
+                # Try multiple extraction methods
+                text = safe_get_text(td, "link")
+                if not text:
+                    text = safe_get_text(td, "time")
+                if not text:
+                    text = safe_get_text(td)
+                
+                if DEBUG_RQMT and row_idx < 3:
+                    print(f"Extracted text: '{text}'")
+                
+                cells.append(text if text else "")
+            
             if cells:
                 rows.append(cells)
+        
+        if DEBUG_RQMT:
+            print(f"\n[DEBUG] Parsed {len(rows)} rows")
+            print(f"[DEBUG] Headers: {headers}")
+            if rows:
+                print(f"[DEBUG] First row: {rows[0]}")
         
         return jsonify({
             "success": True,
@@ -598,4 +877,6 @@ def fetch_rqmt_table(page_id: str):
         })
         
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         return jsonify({"success": False, "message": str(e)}), 500

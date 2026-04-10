@@ -847,14 +847,49 @@ def encode_multipart_formdata(file_storage: FileStorage) -> tuple[bytes, str]:
 def confluence_upload_attachment(page_id: str, file_storage: FileStorage, cfg: AppConfig) -> dict[str, Any]:
     if not cfg.confluence_pat:
         raise RuntimeError("CONFLUENCE_PAT is required for attachment upload.")
+    
+    # Check if file already exists (search all attachments since Confluence may normalize filename)
+    existing_attachment_id = None
+    try:
+        att_url = f"{cfg.confluence_base_url}/rest/api/content/{page_id}/child/attachment?limit=100"
+        att_resp = request_json(att_url, auth_headers(cfg.confluence_pat))
+        results = att_resp.get('results', [])
+        
+        # Search for matching filename (exact match or normalized match)
+        for att in results:
+            att_title = att.get('title', '')
+            # Check exact match or if titles match when normalized
+            if att_title == file_storage.filename:
+                existing_attachment_id = att.get('id')
+                print(f"Found existing attachment (exact match): {att_title} (ID: {existing_attachment_id})")
+                break
+            # Also check if normalized versions match (spaces -> underscores, etc.)
+            normalized_upload = file_storage.filename.replace(' ', '_').replace('-', '_')
+            normalized_existing = att_title.replace(' ', '_').replace('-', '_')
+            if normalized_upload == normalized_existing:
+                existing_attachment_id = att.get('id')
+                print(f"Found existing attachment (normalized match): {att_title} (ID: {existing_attachment_id})")
+                break
+    except Exception as e:
+        print(f"Could not check for existing attachment: {e}")
+    
     body, content_type = encode_multipart_formdata(file_storage)
+    
+    # If file exists, update it; otherwise create new
+    if existing_attachment_id:
+        url = f"{cfg.confluence_base_url}/rest/api/content/{page_id}/child/attachment/{existing_attachment_id}/data"
+        print(f"Updating existing attachment: {file_storage.filename}")
+    else:
+        url = f"{cfg.confluence_base_url}/rest/api/content/{page_id}/child/attachment"
+        print(f"Creating new attachment: {file_storage.filename}")
+    
     payload = request_binary(
-        f"{cfg.confluence_base_url}/rest/api/content/{page_id}/child/attachment",
+        url,
         {**auth_headers(cfg.confluence_pat), "X-Atlassian-Token": "no-check"},
         body,
         content_type,
     )
-    log_activity("upload", "confluence_attachment", page_id, {"filename": file_storage.filename})
+    log_activity("upload", "confluence_attachment", page_id, {"filename": file_storage.filename, "updated": existing_attachment_id is not None})
     return payload
 
 
