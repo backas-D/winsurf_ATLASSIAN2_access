@@ -197,6 +197,7 @@ button {
 }
 .chat-panel .panel-head {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   align-items: center;
   padding-bottom: 12px;
@@ -350,6 +351,15 @@ button {
   color: var(--muted);
   text-align: center;
   min-height: 20px;
+}
+.mode-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 6px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: #fff;
+  margin-bottom: 6px;
 }
 
 /* OEM Selector */

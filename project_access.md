@@ -1534,7 +1534,388 @@ safe_url = download_url.replace('&', '&amp;')
 
 ---
 
-**문서 버전**: v1.3.1  
-**최종 수정일**: 2026-04-08  
+## 13. v1.4.0 개선사항 (2026-04-09~10)
+
+### 13.1 Codex Agent 기반 AI 챗봇 구현
+
+#### 13.1.1 OpenAI Assistant API 연동
+
+**목표**: 자연어로 Jira/Confluence 작업 및 문서 검색 수행
+
+**구현 내용**:
+- OpenAI Assistant API 기반 대화형 챗봇
+- Tool calling 방식으로 Jira/Confluence API 호출
+- 대화 세션 관리 및 이력 추적
+- 실시간 스트리밍 응답
+
+**핵심 파일**:
+- `codex_agent.py`: CodexAgent 클래스, ToolExecutor
+- `chat_service.py`: CodexChatService, 레거시 ChatService
+- `codex_tools.json`: Tool 정의 (Jira/Confluence/RAG)
+
+**지원 도구**:
+1. `search_jira_issues`: 프로젝트 Key로 Jira 이슈 검색
+2. `search_confluence_pages`: 프로젝트명으로 Confluence 페이지 검색
+3. `fetch_confluence_page`: 페이지 ID/URL로 상세 조회
+4. `search_documents`: RAG 기반 문서 검색
+5. `list_documents`: 업로드된 문서 목록 조회
+
+#### 13.1.2 Codex Agent Fallback 메커니즘
+
+**문제**: OpenAI API 할당량 초과 시 챗봇 중단
+
+**해결**: Rule-based fallback 구현
+
+**Fallback 로직**:
+```python
+def _fallback_rule_based(self, user_message: str):
+    # 1. 프로젝트 키 감지 (alphanumeric 지원)
+    match_key = re.search(r"\b([A-Z][A-Z0-9]{1,9})\b", user_message)
+    
+    # 2. Confluence 페이지 ID 감지
+    match_page_id = re.search(r"\[(\d{5,})\]", user_message)
+    
+    # 3. Confluence URL 감지
+    match_url = re.search(r"(https?://\S*confluence\S*)", user_message)
+    
+    # 4. 키워드 기반 도구 선택
+    if "jira" in msg_lower or "이슈" in msg_lower:
+        return search_jira_issues(match_key)
+    elif match_page_id or match_url:
+        return fetch_confluence_page(page_ref)
+```
+
+**개선 사항**:
+- 프로젝트 키 패턴: `J150`, `G80`, `F2` 등 alphanumeric 지원
+- Confluence 페이지 ID: `[386584075]` 패턴 자동 감지
+- URL 크롤링: Confluence URL 직접 입력 지원
+- 키워드 확장: "프로젝트", "파일", "업로드", "첨부" 등
+
+#### 13.1.3 Confluence 페이지 크롤링 강화
+
+**하위 페이지 첨부 파일 검색**:
+```python
+# CQL 기반 전체 첨부 파일 검색
+cql = f"type=attachment AND ancestor={page_id}"
+# 최대 100개 첨부 파일 조회 (하위 페이지 포함)
+```
+
+**반환 정보**:
+- 파일명, 크기, MIME 타입
+- 소속 페이지 제목 및 ID
+- 버전, 수정일, 수정자
+- 최신순 정렬
+
+**UI 표시**:
+```
+📎 첨부 파일 15개 (하위 페이지 포함):
+  - 260309_KGM_J150_BSD_RQMT_R01_SOP.0 - rev 04.xlsx (v1, 2025-03-09, by 나현민) [RN2. KGM_SRR30_J150_NEW_G.H_PPSOP.0]
+```
+
+### 13.2 RAG (Retrieval Augmented Generation) 시스템
+
+#### 13.2.1 문서 업로드 및 벡터 스토어 인덱싱
+
+**목표**: 사양서, 법규, 메일 문서를 검색 가능하도록 색인화
+
+**구현 파일**:
+- `document_store.py`: DocumentStore 클래스
+- `rag_service.py`: RAGService 클래스
+
+**지원 문서 타입**:
+- **사양서**: PDF, DOCX, TXT, MD, HTML
+- **법규**: PDF, DOCX, TXT
+- **메일**: MSG (Outlook), EML
+
+**업로드 프로세스**:
+```
+1. 파일 업로드 (웹 UI)
+   ↓
+2. 메타데이터 추출
+   - 제목, 버전, 부서, 시행일
+   - 파일 해시 (중복 체크)
+   ↓
+3. OpenAI File API 업로드
+   ↓
+4. Vector Store에 색인화
+   ↓
+5. SQLite에 메타데이터 저장
+```
+
+**데이터베이스 스키마**:
+```sql
+CREATE TABLE documents (
+    id INTEGER PRIMARY KEY,
+    source_type TEXT,           -- spec, regulation, email
+    title TEXT,
+    version TEXT,
+    effective_from TEXT,
+    department TEXT,
+    file_hash TEXT,             -- 중복 방지
+    openai_file_id TEXT,
+    vector_store_id TEXT,
+    indexed_at TEXT
+);
+
+CREATE TABLE mail_metadata (
+    id INTEGER PRIMARY KEY,
+    document_id INTEGER,
+    sender TEXT,
+    recipients TEXT,
+    subject TEXT,
+    sent_date TEXT,
+    FOREIGN KEY (document_id) REFERENCES documents(id)
+);
+```
+
+#### 13.2.2 RAG 검색 및 출처 추적
+
+**OpenAI Responses API 사용**:
+```python
+response = client.beta.threads.runs.create(
+    thread_id=thread.id,
+    assistant_id=assistant_id,
+    tools=[{"type": "file_search"}],
+    tool_resources={
+        "file_search": {
+            "vector_store_ids": [vector_store_id]
+        }
+    }
+)
+```
+
+**Citation 강화**:
+- 파일명, 제목, 버전
+- 시행일, 부서
+- 인용 텍스트 (quote)
+- 메일 메타데이터 (발신자, 수신자, 제목)
+
+**UI 표시**:
+```
+📚 출처:
+  - 개인정보보호법 시행령 (v2023.03) [시행일: 2023-03-14] — "개인정보는 수집 후 3년간 보관..."
+  - RE: 차량 사양 검토 요청 (발신: 김철수, 수신: 나현민, 2025-11-04)
+```
+
+### 13.3 Release Note 및 RQMT 섹션
+
+#### 13.3.1 UI 구조 개편
+
+**MCP Preview 제거**:
+- 사이드바의 MCP 설정 JSON 표시 제거
+- UI 간소화
+
+**Release Note 개정 섹션**:
+- 제목: "Release Note 개정"
+- Quill 에디터 유지
+- 파일 첨부 기능 포함
+
+**Project Requirement 수정 섹션** (신규):
+- 제목: "Project Requirement 수정"
+- 일반 textarea (Quill 제거)
+- 라벨: "Revision Note"
+- 테이블 보기 모달 연동
+
+#### 13.3.2 프로젝트 선택 시 자동 페이지 감지
+
+**기능**: 프로젝트 선택 모달에서 프로젝트 선택 시 "2. Project Requirement - {프로젝트명}" 페이지 자동 감지
+
+**구현**:
+```javascript
+// 페이지 로드 시 트리 노드 순회
+treeNodes.forEach(node => {
+  const txt = node.textContent.trim().replace(/\s*\[\d+\]\s*$/, '').trim();
+  if (/^2\.\s*Project Requirement/i.test(txt)) {
+    const pid = node.getAttribute('data-page-id');
+    rqmtPageIdInput.value = pid;
+    rqmtSelectedPageInput.value = `${txt} [${pid}]`;
+  }
+});
+```
+
+**사용자 경험**:
+```
+1. 프로젝트 선택 모달에서 "J150 [SRR-30]" 선택
+   ↓
+2. 페이지 리로드 후 트리 표시
+   ↓
+3. "2. Project Requirement - J150" 자동 감지
+   ↓
+4. RQMT 섹션의 "선택된 페이지"에 자동 입력
+   ✅ "2. Project Requirement - J150 [386584075]"
+```
+
+#### 13.3.3 RQMT 테이블 모달 기능
+
+**목표**: Confluence "2. Project Requirement" 페이지의 테이블을 모달로 표시하고 선택한 행을 textarea에 추가
+
+**API 엔드포인트**:
+```python
+@frontend_bp.get("/api/fetch-rqmt-table/<page_id>")
+def fetch_rqmt_table(page_id: str):
+    # 1. Confluence REST API로 페이지 HTML 가져오기
+    # 2. BeautifulSoup로 <table> 파싱
+    # 3. 헤더와 행 데이터 JSON 반환
+    return jsonify({
+        "success": True,
+        "headers": ["##", "Project Requirement", "Phase", "revision", "Date", "Author", "Comment"],
+        "rows": [
+            ["00", "291104 KGM J150 RED: RQMT_R01...", "PILOT", "00", "2025-11-4", "나현민", "initial"],
+            ...
+        ]
+    })
+```
+
+**모달 UI**:
+- 테이블 렌더링 (체크박스 포함)
+- 전체 선택/해제 기능
+- "선택 항목 추가" 버튼
+
+**텍스트 변환 형식**:
+```
+[00] 291104 KGM J150 RED: RQMT_R01_PLot2Ta - rev 00.xlsx | PILOT | 00 | 2025-11-4 | 나현민 | initial
+[01] 291107 KGM J150 RED: RQMT_R01_PLot2Ta - rev 01.xlsx | T | 01 | 2025-11-7 | 나현민 | [FVSE OTA] 미반영 기능 추가
+```
+
+**사용 플로우**:
+```
+1. "📋 테이블 보기" 버튼 클릭
+   ↓
+2. 모달에서 필요한 행 체크박스 선택
+   ↓
+3. "선택 항목 추가" 클릭
+   ↓
+4. textarea에 텍스트 형식으로 삽입
+   ↓
+5. 추가 내용 작성 후 "RQMT 등록" 제출
+```
+
+**기술적 개선**:
+- BeautifulSoup `get_text(separator=" ", strip=True)`: 중첩 요소 텍스트 추출
+- 퍼지 매칭: 한글 파일명 처리
+- XHTML `&amp;` 이스케이프
+
+### 13.4 챗봇 UI/UX 개선
+
+#### 13.4.1 챗봇 패널 추가
+
+**위치**: 메인 영역 하단
+
+**기능**:
+- 메시지 입력 및 전송
+- 대화 이력 표시
+- 모드 배지 표시 (Codex CLI, Codex Agent, Chat API, Rule Based)
+- 대화 초기화 버튼
+- 문서 업로드 버튼 (collapsible)
+
+**모드 배지**:
+```javascript
+const modeMap = {
+  'codex_cli': ['⚡ Codex CLI', '#10b981'],
+  'codex_agent': ['🤖 Codex Agent', '#3b82f6'],
+  'chat_api': ['💬 Chat API', '#8b5cf6'],
+  'rule_based': ['📋 Rule Based', '#f59e0b'],
+};
+```
+
+#### 13.4.2 문서 업로드 UI
+
+**Collapsible 섹션**:
+- 문서 타입 선택: 사양서, 법규, 메일
+- 제목, 버전, 부서, 시행일 입력
+- 파일 선택 (PDF, DOCX, MSG 등)
+- 업로드 상태 표시
+
+**업로드 결과**:
+```
+✅ 색인 완료: 개인정보보호법 시행령 (v2023.03)
+✅ 중복: 차량 사양서 (v1.0) - 이미 등록됨
+❌ 업로드 실패: 파일 형식 오류
+```
+
+### 13.5 변경된 파일 목록
+
+**새 파일**:
+- `codex_agent.py`: Codex Agent 및 ToolExecutor
+- `codex_tools.json`: Tool 정의
+- `document_store.py`: 문서 업로드 및 벡터 스토어
+- `rag_service.py`: RAG 검색 및 Citation
+- `chat_service.py`: CodexChatService, 레거시 ChatService
+
+**수정 파일**:
+- `backend.py`: 
+  - AppConfig에 `openai_assistant_id`, `vector_store_*` 추가
+  - `documents`, `mail_metadata` 테이블 추가
+- `frontend.py`:
+  - `/api/chat` 엔드포인트 추가
+  - `/api/documents` (GET/POST) 추가
+  - `/api/fetch-rqmt-table/<page_id>` 추가
+- `templates/index.html`:
+  - 챗봇 패널 추가
+  - 문서 업로드 UI 추가
+  - RQMT 테이블 모달 추가
+  - MCP Preview 제거
+- `static/styles.css`:
+  - 챗봇 스타일 추가
+  - 모드 배지 스타일 추가
+- `requirements.txt`:
+  - `beautifulsoup4`, `lxml`, `requests` 추가
+- `.env.production.example`:
+  - `OPENAI_ASSISTANT_ID`, `OPENAI_VECTOR_STORE_*` 추가
+
+### 13.6 환경 변수 추가
+
+```bash
+# Codex Agent / RAG Configuration
+OPENAI_ASSISTANT_ID=asst_xxxxxxxxxxxxxxxxxxxxx
+OPENAI_VECTOR_STORE_SPEC=vs_xxxxxxxxxxxxxxxxxxxxx
+OPENAI_VECTOR_STORE_REG=vs_xxxxxxxxxxxxxxxxxxxxx
+OPENAI_VECTOR_STORE_EMAIL=vs_xxxxxxxxxxxxxxxxxxxxx
+```
+
+### 13.7 배포 및 업그레이드
+
+**의존성 설치**:
+```bash
+pip install beautifulsoup4 lxml requests
+```
+
+**환경 변수 설정**:
+1. OpenAI Assistant 생성
+2. Vector Store 3개 생성 (사양서, 법규, 메일)
+3. `.env`에 ID 입력
+
+**업그레이드 방법**:
+1. `pip install -r requirements.txt`
+2. `.env` 업데이트
+3. 서버 재시작
+4. 브라우저 캐시 클리어
+
+**호환성**:
+- 기존 Jira/Confluence 기능: 완전 유지
+- 기존 Release Note 기능: 완전 유지
+- 신규 기능: 선택적 사용 (환경 변수 미설정 시 비활성화)
+
+### 13.8 향후 개선 계획
+
+**챗봇 기능**:
+- [ ] 대화 이력 저장 및 불러오기
+- [ ] 멀티턴 대화 컨텍스트 유지
+- [ ] 사용자별 세션 관리
+
+**RAG 기능**:
+- [ ] 문서 재색인 기능
+- [ ] 문서 삭제 기능
+- [ ] 문서 검색 필터 (날짜, 부서, 버전)
+
+**RQMT 기능**:
+- [ ] 테이블 직접 편집
+- [ ] 행 추가/삭제
+- [ ] 버전 비교
+
+---
+
+**문서 버전**: v1.4.0  
+**최종 수정일**: 2026-04-10  
 **작성자**: backas-D  
 **문서 상태**: 실제 구현 기반 완료

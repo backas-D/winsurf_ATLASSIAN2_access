@@ -52,7 +52,8 @@ OEM_ROOT_PAGES = {
 @dataclass
 class AppConfig:
     openai_api_key: str = ""
-    openai_model: str = "gpt-5.4"
+    openai_model: str = "gpt-4o-mini"
+    openai_assistant_id: str = ""
     jira_base_url: str = ""
     jira_pat: str = ""
     confluence_base_url: str = ""
@@ -121,6 +122,7 @@ def load_config() -> AppConfig:
     return AppConfig(
         openai_api_key=raw.get("OPENAI_API_KEY", ""),
         openai_model=model,
+        openai_assistant_id=raw.get("OPENAI_ASSISTANT_ID", ""),
         jira_base_url=raw.get("JIRA_BASE_URL", "").rstrip("/"),
         jira_pat=raw.get("JIRA_PAT", "").strip(),
         confluence_base_url=raw.get("CONFLUENCE_BASE_URL", "").rstrip("/"),
@@ -151,6 +153,41 @@ def ensure_storage() -> None:
                 created_at TEXT NOT NULL,
                 source_file TEXT NOT NULL,
                 result_markdown TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS documents (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_type TEXT NOT NULL,
+                title TEXT NOT NULL,
+                version TEXT,
+                effective_from TEXT,
+                department TEXT,
+                confidentiality TEXT DEFAULT 'internal',
+                file_path TEXT,
+                file_name TEXT,
+                file_hash TEXT,
+                mime_type TEXT,
+                openai_file_id TEXT,
+                vector_store_id TEXT,
+                vector_store_file_id TEXT,
+                indexed_at TEXT,
+                created_at TEXT DEFAULT (datetime('now'))
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS mail_metadata (
+                document_id INTEGER PRIMARY KEY,
+                sender TEXT,
+                recipients TEXT,
+                sent_at TEXT,
+                subject TEXT,
+                thread_id TEXT,
+                FOREIGN KEY (document_id) REFERENCES documents(id)
             )
             """
         )

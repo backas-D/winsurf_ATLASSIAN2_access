@@ -20,11 +20,13 @@ from backend import (
     jira_update_issue,
     load_config,
 )
-from chat_service import ChatService
+from chat_service import ChatService, CodexChatService
 
 frontend_bp = Blueprint("frontend", __name__)
 
-chat_sessions: dict[str, ChatService] = {}
+# USE_CODEX_AGENT=false in .env to rollback to legacy ChatService
+_use_codex = True
+chat_sessions: dict[str, ChatService | CodexChatService] = {}
 
 
 def build_default_state() -> SearchState:
@@ -293,7 +295,7 @@ def chat():
             }), 400
         
         if session_id not in chat_sessions:
-            chat_sessions[session_id] = ChatService(cfg)
+            chat_sessions[session_id] = CodexChatService(cfg) if _use_codex else ChatService(cfg)
         
         chat_service = chat_sessions[session_id]
         result = chat_service.process_message(user_message)
@@ -342,6 +344,82 @@ def get_chat_history():
             "message": f"오류가 발생했습니다: {str(e)}"
         }), 500
 
+
+# ---------------------------------------------------------------------------
+# Document management API
+# ---------------------------------------------------------------------------
+
+@frontend_bp.post("/api/documents")
+def upload_document():
+    """문서 업로드 및 Vector Store 색인"""
+    try:
+        if "file" not in request.files:
+            return jsonify({"success": False, "message": "파일이 첨부되지 않았습니다."}), 400
+
+        file = request.files["file"]
+        if not file.filename:
+            return jsonify({"success": False, "message": "파일명이 없습니다."}), 400
+
+        source_type = request.form.get("source_type", "spec")
+        title = request.form.get("title", file.filename)
+        version = request.form.get("version")
+        effective_from = request.form.get("effective_from")
+        department = request.form.get("department")
+
+        cfg = load_config()
+        from document_store import DocumentStore
+
+        store = DocumentStore(cfg)
+        result = store.upload_document(
+            file_storage=file,
+            source_type=source_type,
+            title=title,
+            version=version,
+            effective_from=effective_from,
+            department=department,
+        )
+        return jsonify({"success": True, **result})
+
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
+@frontend_bp.get("/api/documents")
+def list_documents():
+    """업로드된 문서 목록 조회"""
+    try:
+        source_type = request.args.get("source_type")
+        limit = request.args.get("limit", 20, type=int)
+
+        cfg = load_config()
+        from document_store import DocumentStore
+
+        store = DocumentStore(cfg)
+        docs = store.list_documents(source_type=source_type, limit=limit)
+        return jsonify({"success": True, "documents": docs})
+
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
+@frontend_bp.post("/api/documents/<int:doc_id>/reindex")
+def reindex_document(doc_id: int):
+    """문서 재색인"""
+    try:
+        cfg = load_config()
+        from document_store import DocumentStore
+
+        store = DocumentStore(cfg)
+        result = store.reindex_document(doc_id)
+        return jsonify({"success": True, **result})
+
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
+# ---------------------------------------------------------------------------
+# Project filtering API
+# ---------------------------------------------------------------------------
 
 @frontend_bp.post("/api/filter-projects")
 def filter_projects():
@@ -465,3 +543,59 @@ def download_confluence_file(page_id: str, filename: str):
         import traceback
         traceback.print_exc()
         return f"파일 다운로드 실패: {str(e)}", 500
+
+
+@frontend_bp.get("/api/fetch-rqmt-table/<page_id>")
+def fetch_rqmt_table(page_id: str):
+    """Fetch and parse table from Confluence RQMT page"""
+    import requests
+    from bs4 import BeautifulSoup
+    from backend import auth_headers
+    
+    cfg = load_config()
+    
+    try:
+        url = f"{cfg.confluence_base_url}/rest/api/content/{page_id}?expand=body.storage"
+        headers = auth_headers(cfg.confluence_pat)
+        headers["Accept"] = "application/json"
+        
+        resp = requests.get(url, headers=headers, timeout=15)
+        resp.raise_for_status()
+        
+        data = resp.json()
+        raw_html = data.get("body", {}).get("storage", {}).get("value", "")
+        
+        if not raw_html:
+            return jsonify({"success": False, "message": "페이지 내용이 없습니다."}), 404
+        
+        soup = BeautifulSoup(raw_html, "html.parser")
+        table = soup.find("table")
+        
+        if not table:
+            return jsonify({"success": False, "message": "테이블을 찾을 수 없습니다."}), 404
+        
+        # Parse headers
+        headers_row = table.find("tr")
+        headers = []
+        if headers_row:
+            for th in headers_row.find_all(["th", "td"]):
+                headers.append(th.get_text(strip=True))
+        
+        # Parse rows
+        rows = []
+        for tr in table.find_all("tr")[1:]:  # Skip header row
+            cells = []
+            for td in tr.find_all("td"):
+                cells.append(td.get_text(strip=True))
+            if cells:
+                rows.append(cells)
+        
+        return jsonify({
+            "success": True,
+            "headers": headers,
+            "rows": rows,
+            "page_title": data.get("title", "")
+        })
+        
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500

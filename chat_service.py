@@ -9,6 +9,44 @@ from openai import OpenAI
 from backend import AppConfig, find_confluence_pages, find_jira_issues
 
 
+# ---------------------------------------------------------------------------
+# New: Codex-agent-based chat service
+# ---------------------------------------------------------------------------
+
+class CodexChatService:
+    """Chat service powered by the Codex CLI agent (or Chat API fallback).
+
+    Combines:
+    - CodexAgent for natural-language understanding + tool dispatch
+    - ToolExecutor for calling backend functions (Jira, Confluence)
+    - RAGService for document-based search (specs, regulations, emails)
+    """
+
+    def __init__(self, config: AppConfig):
+        from codex_agent import CodexAgent, ToolExecutor
+        from document_store import DocumentStore
+        from rag_service import RAGService
+
+        self.config = config
+        self.doc_store = DocumentStore(config)
+        self.rag_service = RAGService(config, self.doc_store)
+        self.executor = ToolExecutor(config, rag_service=self.rag_service)
+        self.agent = CodexAgent(config, tool_executor=self.executor)
+
+    def process_message(self, user_message: str) -> dict[str, Any]:
+        return self.agent.process_message(user_message)
+
+    def clear_history(self) -> None:
+        self.agent.clear_history()
+
+    def get_history(self) -> list[dict[str, Any]]:
+        return self.agent.conversation_history
+
+
+# ---------------------------------------------------------------------------
+# Legacy: original ChatService (kept for rollback via USE_CODEX_AGENT=false)
+# ---------------------------------------------------------------------------
+
 class ChatService:
     def __init__(self, config: AppConfig):
         self.config = config

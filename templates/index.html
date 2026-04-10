@@ -48,10 +48,6 @@
         </button>
       </div>
 
-      <div class="mcp-card">
-        <p class="card-label">MCP Preview</p>
-        <pre>{{ mcp_preview | tojson(indent=2) }}</pre>
-      </div>
     </aside>
 
     <main class="content">
@@ -126,7 +122,7 @@
       <section class="workspace-grid">
         <article class="panel">
           <div class="panel-head">
-            <h3>Confluence 수정 / 파일 업로드</h3>
+            <h3>Release Note 개정</h3>
             <p>페이지 본문을 추가하거나 첨부 파일을 올립니다.</p>
           </div>
 
@@ -140,6 +136,27 @@
             <div id="quill_editor" style="height: 200px;"></div>
             <input type="hidden" id="confluence_append_text" name="confluence_append_text">
             <button type="submit">Confluence 내용 추가</button>
+          </form>
+
+          <hr style="border:none;border-top:1px solid var(--line);margin:16px 0;">
+
+          <div class="panel-head">
+            <h3>Project Requirement 수정</h3>
+            <p>선택된 페이지에 RQMT 항목을 등록합니다.</p>
+          </div>
+
+          <form class="stack" method="post" action="/confluence/update" id="rqmt_update_form">
+            <input type="hidden" name="project_name" value="{{ state.project_name }}">
+            <input type="hidden" id="rqmt_page_id" name="confluence_page_id" value="{{ state.selected_confluence_page_id }}">
+            <input type="hidden" name="confluence_title" value="">
+            <label for="rqmt_selected_page">선택된 페이지</label>
+            <input id="rqmt_selected_page" type="text" disabled placeholder="트리에서 페이지를 선택하세요">
+            <div style="display:flex;justify-content:space-between;align-items:center;">
+              <label for="rqmt_content">Revision Note</label>
+              <button type="button" id="showRqmtTableBtn" class="btn-secondary" style="padding:4px 12px;font-size:0.85rem;">📋 테이블 보기</button>
+            </div>
+            <textarea id="rqmt_content" name="confluence_append_text" rows="8" placeholder="[Project Requirement] 밑에 작성할 내용을 입력하세요"></textarea>
+            <button type="submit">RQMT 등록</button>
           </form>
 
         </article>
@@ -180,9 +197,38 @@
       <section class="chat-section">
         <article class="panel chat-panel">
           <div class="panel-head">
-            <h3>🤖 AI Chat Bot</h3>
-            <p>자연어로 Jira/Confluence 작업을 요청하세요 (모델: gpt-4o-mini)</p>
-            <button id="clearChatBtn" class="btn-secondary">대화 초기화</button>
+            <h3>🤖 AI Chat Bot (Codex Agent)</h3>
+            <p>Jira/Confluence 검색 · 문서(사양서/법규/메일) RAG 분석 · Confluence URL 크롤링</p>
+            <div style="display:flex;gap:6px;margin-top:6px;">
+              <button id="clearChatBtn" class="btn-secondary">대화 초기화</button>
+              <button id="toggleDocUpload" class="btn-secondary" onclick="toggleDocumentUpload()">📄 문서 업로드</button>
+            </div>
+          </div>
+
+          <!-- Document upload (collapsible) -->
+          <div id="docUploadSection" style="display:none;padding:12px;border:1px solid var(--line);border-radius:12px;margin:8px 0;background:var(--paper-strong);">
+            <form id="docUploadForm" enctype="multipart/form-data">
+              <div style="display:grid;gap:8px;">
+                <div style="display:flex;gap:8px;">
+                  <select name="source_type" style="flex:1;padding:6px;border-radius:8px;border:1px solid var(--line);">
+                    <option value="spec">사양서</option>
+                    <option value="regulation">법규</option>
+                    <option value="email">메일</option>
+                  </select>
+                  <input type="text" name="title" placeholder="문서 제목" style="flex:2;padding:6px;border-radius:8px;border:1px solid var(--line);">
+                </div>
+                <div style="display:flex;gap:8px;">
+                  <input type="text" name="version" placeholder="버전 (선택)" style="flex:1;padding:6px;border-radius:8px;border:1px solid var(--line);">
+                  <input type="text" name="department" placeholder="부서 (선택)" style="flex:1;padding:6px;border-radius:8px;border:1px solid var(--line);">
+                  <input type="date" name="effective_from" style="flex:1;padding:6px;border-radius:8px;border:1px solid var(--line);">
+                </div>
+                <div style="display:flex;gap:8px;align-items:center;">
+                  <input type="file" name="file" accept=".pdf,.txt,.md,.html,.msg,.docx,.csv,.json" style="flex:1;">
+                  <button type="submit" class="btn-primary" style="padding:8px 16px;">업로드</button>
+                </div>
+              </div>
+            </form>
+            <div id="docUploadStatus" style="margin-top:6px;font-size:0.85rem;"></div>
           </div>
           
           <div id="chatMessages" class="chat-messages">
@@ -193,7 +239,8 @@
                 <ul>
                   <li>"IDA 프로젝트의 최근 이슈 10개 보여줘"</li>
                   <li>"AO 스페이스에서 release 관련 페이지 찾아줘"</li>
-                  <li>"IDA-1001 이슈 요약해줘"</li>
+                  <li>"개인정보 보관 기간 관련 법규 근거 알려줘"</li>
+                  <li>"이 페이지 분석해줘: https://confluence.../pages/12345"</li>
                 </ul>
               </div>
             </div>
@@ -228,6 +275,25 @@
       </div>
       <div class="modal-footer">
         <button class="btn-secondary" onclick="closeOEMProjectModal()">취소</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- RQMT Table Modal -->
+  <div id="rqmtTableModal" class="modal" style="display: none;">
+    <div class="modal-content" style="max-width: 90%; max-height: 90vh;">
+      <div class="modal-header">
+        <h3>📋 Project Requirement 테이블</h3>
+        <button class="modal-close" onclick="closeRqmtTableModal()">&times;</button>
+      </div>
+      <div class="modal-body" style="overflow: auto; max-height: 60vh;">
+        <div id="rqmtTableContainer">
+          <div class="loading">테이블을 불러오는 중...</div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn-primary" onclick="addSelectedRowsToTextarea()">선택 항목 추가</button>
+        <button class="btn-secondary" onclick="closeRqmtTableModal()">닫기</button>
       </div>
     </div>
   </div>
@@ -395,7 +461,21 @@
       const confluenceUploadPageIdInput = document.getElementById('confluence_upload_page_id');
       const confluenceSelectedPageInput = document.getElementById('confluence_selected_page');
       const confluenceUploadSelectedPageInput = document.getElementById('confluence_upload_selected_page');
-      
+      const rqmtPageIdInput = document.getElementById('rqmt_page_id');
+      const rqmtSelectedPageInput = document.getElementById('rqmt_selected_page');
+
+      // Auto-detect "2. Project Requirement" node and pre-fill RQMT section
+      treeNodes.forEach(node => {
+        const txt = node.textContent.trim().replace(/\s*\[\d+\]\s*$/, '').trim();
+        if (/^2\.\s*Project Requirement/i.test(txt)) {
+          const pid = node.getAttribute('data-page-id');
+          if (pid && rqmtPageIdInput && rqmtSelectedPageInput) {
+            rqmtPageIdInput.value = pid;
+            rqmtSelectedPageInput.value = `${txt} [${pid}]`;
+          }
+        }
+      });
+
       treeNodes.forEach(node => {
         node.addEventListener('click', function(e) {
           // Only prevent default if not opening in new tab (middle click or ctrl+click)
@@ -421,6 +501,12 @@
               }
               if (confluenceUploadSelectedPageInput) {
                 confluenceUploadSelectedPageInput.value = displayText;
+              }
+              if (rqmtPageIdInput) {
+                rqmtPageIdInput.value = pageId;
+              }
+              if (rqmtSelectedPageInput) {
+                rqmtSelectedPageInput.value = displayText;
               }
               
               // Visual feedback
@@ -661,6 +747,108 @@
         });
       }
     });
+
+    // --- RQMT Table Modal ---
+    let rqmtTableData = null;
+
+    document.getElementById('showRqmtTableBtn').addEventListener('click', function() {
+      const pageId = document.getElementById('rqmt_page_id').value;
+      if (!pageId) {
+        alert('페이지를 먼저 선택해주세요.');
+        return;
+      }
+      showRqmtTableModal(pageId);
+    });
+
+    function showRqmtTableModal(pageId) {
+      document.getElementById('rqmtTableModal').style.display = 'flex';
+      loadRqmtTable(pageId);
+    }
+
+    function closeRqmtTableModal() {
+      document.getElementById('rqmtTableModal').style.display = 'none';
+    }
+
+    function loadRqmtTable(pageId) {
+      const container = document.getElementById('rqmtTableContainer');
+      container.innerHTML = '<div class="loading">테이블을 불러오는 중...</div>';
+
+      fetch(`/api/fetch-rqmt-table/${pageId}`)
+        .then(response => response.json())
+        .then(data => {
+          if (data.success) {
+            rqmtTableData = data;
+            renderRqmtTable(data);
+          } else {
+            container.innerHTML = `<div class="error">테이블 로드 실패: ${data.message}</div>`;
+          }
+        })
+        .catch(error => {
+          container.innerHTML = `<div class="error">오류: ${error.message}</div>`;
+        });
+    }
+
+    function renderRqmtTable(data) {
+      const container = document.getElementById('rqmtTableContainer');
+      
+      let html = '<table class="rqmt-table" style="width:100%;border-collapse:collapse;font-size:0.9rem;">';
+      
+      // Header
+      html += '<thead><tr style="background:#f5f5f5;">';
+      html += '<th style="padding:8px;border:1px solid #ddd;"><input type="checkbox" id="selectAllRows" onchange="toggleAllRows(this)"></th>';
+      data.headers.forEach(h => {
+        html += `<th style="padding:8px;border:1px solid #ddd;text-align:left;">${h}</th>`;
+      });
+      html += '</tr></thead>';
+      
+      // Rows
+      html += '<tbody>';
+      data.rows.forEach((row, idx) => {
+        html += '<tr>';
+        html += `<td style="padding:8px;border:1px solid #ddd;text-align:center;"><input type="checkbox" class="row-checkbox" data-row-idx="${idx}"></td>`;
+        row.forEach(cell => {
+          html += `<td style="padding:8px;border:1px solid #ddd;">${cell}</td>`;
+        });
+        html += '</tr>';
+      });
+      html += '</tbody></table>';
+      
+      container.innerHTML = html;
+    }
+
+    function toggleAllRows(checkbox) {
+      document.querySelectorAll('.row-checkbox').forEach(cb => {
+        cb.checked = checkbox.checked;
+      });
+    }
+
+    function addSelectedRowsToTextarea() {
+      if (!rqmtTableData) return;
+      
+      const selected = [];
+      document.querySelectorAll('.row-checkbox:checked').forEach(cb => {
+        const idx = parseInt(cb.getAttribute('data-row-idx'));
+        const row = rqmtTableData.rows[idx];
+        if (row) {
+          // Format: [##] Project Requirement | Phase | revision | Date | Author | Comment
+          const formatted = `[${row[0]}] ${row[1]} | ${row[2]} | ${row[3]} | ${row[4]} | ${row[5]} | ${row[6]}`;
+          selected.push(formatted);
+        }
+      });
+      
+      if (selected.length === 0) {
+        alert('항목을 선택해주세요.');
+        return;
+      }
+      
+      const textarea = document.getElementById('rqmt_content');
+      const currentValue = textarea.value;
+      const newValue = currentValue + (currentValue ? '\n\n' : '') + selected.join('\n');
+      textarea.value = newValue;
+      
+      closeRqmtTableModal();
+    }
+
   </script>
 
   <script>
@@ -677,10 +865,45 @@
       
       const contentDiv = document.createElement('div');
       contentDiv.className = 'message-content';
+
+      // Mode badge for assistant messages
+      if (role === 'assistant' && data && data.mode) {
+        const badge = document.createElement('span');
+        badge.className = 'mode-badge';
+        const modeMap = {
+          'codex_cli': ['⚡ Codex CLI', '#10b981'],
+          'codex_agent': ['🤖 Codex Agent', '#3b82f6'],
+          'chat_api': ['💬 Chat API', '#8b5cf6'],
+          'rule_based': ['📋 Rule Based', '#f59e0b'],
+        };
+        const [label, color] = modeMap[data.mode] || ['🔧 ' + data.mode, '#6b7280'];
+        badge.textContent = label;
+        badge.style.background = color;
+        contentDiv.appendChild(badge);
+      }
       
       const textP = document.createElement('p');
       textP.textContent = content;
       contentDiv.appendChild(textP);
+
+      // Citations from RAG
+      if (data && data.action_result && data.action_result.citations) {
+        const citDiv = document.createElement('div');
+        citDiv.className = 'action-result';
+        citDiv.innerHTML = '<strong>📚 출처:</strong>';
+        const ul = document.createElement('ul');
+        data.action_result.citations.forEach(c => {
+          const li = document.createElement('li');
+          let info = c.title || c.file_name || '';
+          if (c.version) info += ` (${c.version})`;
+          if (c.effective_from) info += ` [시행일: ${c.effective_from}]`;
+          if (c.quote) info += ` — "${c.quote.substring(0, 100)}..."`;
+          li.textContent = info;
+          ul.appendChild(li);
+        });
+        citDiv.appendChild(ul);
+        contentDiv.appendChild(citDiv);
+      }
       
       if (data && data.action_result) {
         const resultDiv = document.createElement('div');
@@ -793,6 +1016,48 @@
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
         sendMessage();
+      }
+    });
+  </script>
+
+  <script>
+    // Document upload toggle & form handling
+    function toggleDocumentUpload() {
+      const section = document.getElementById('docUploadSection');
+      section.style.display = section.style.display === 'none' ? 'block' : 'none';
+    }
+
+    document.getElementById('docUploadForm').addEventListener('submit', async function(e) {
+      e.preventDefault();
+      const form = e.target;
+      const statusDiv = document.getElementById('docUploadStatus');
+      const fileInput = form.querySelector('input[name="file"]');
+
+      if (!fileInput.files.length) {
+        statusDiv.textContent = '파일을 선택해주세요.';
+        statusDiv.style.color = '#ef4444';
+        return;
+      }
+
+      const formData = new FormData(form);
+      statusDiv.textContent = '업로드 중...';
+      statusDiv.style.color = '#6b7280';
+
+      try {
+        const resp = await fetch('/api/documents', { method: 'POST', body: formData });
+        const data = await resp.json();
+        if (data.success) {
+          const st = data.status === 'indexed' ? '색인 완료' : data.status === 'duplicate' ? '중복' : '업로드 완료';
+          statusDiv.textContent = `✅ ${st}: ${data.title || data.file_name || ''}`;
+          statusDiv.style.color = '#10b981';
+          form.reset();
+        } else {
+          statusDiv.textContent = `❌ ${data.message}`;
+          statusDiv.style.color = '#ef4444';
+        }
+      } catch (err) {
+        statusDiv.textContent = `❌ ${err.message}`;
+        statusDiv.style.color = '#ef4444';
       }
     });
   </script>

@@ -1,0 +1,118 @@
+[
+  {
+    "name": "search_jira_issues",
+    "description": "Jira 프로젝트의 이슈를 검색합니다. 프로젝트 Key를 입력하면 해당 프로젝트의 이슈 목록을 반환합니다.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "project_key": {
+          "type": "string",
+          "description": "Jira 프로젝트 Key (예: IDA, J115, AO)"
+        }
+      },
+      "required": ["project_key"]
+    }
+  },
+  {
+    "name": "search_confluence_pages",
+    "description": "Confluence 스페이스/프로젝트의 페이지를 검색합니다.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "project_name": {
+          "type": "string",
+          "description": "프로젝트 이름 또는 스페이스 Key"
+        }
+      },
+      "required": ["project_name"]
+    }
+  },
+  {
+    "name": "fetch_confluence_page",
+    "description": "Confluence 페이지 ID 또는 URL로 해당 페이지의 전체 내용을 가져옵니다.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "page_id_or_url": {
+          "type": "string",
+          "description": "Confluence 페이지 ID(숫자) 또는 전체 URL"
+        }
+      },
+      "required": ["page_id_or_url"]
+    }
+  },
+  {
+    "name": "search_documents",
+    "description": "업로드된 문서(사양서/법규/메일)에서 관련 내용을 검색합니다. OpenAI Vector Store의 File Search를 사용하여 의미 기반 검색을 수행합니다.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "검색 질문 (자연어)"
+        },
+        "source_types": {
+          "type": "array",
+          "items": { "type": "string", "enum": ["spec", "regulation", "email"] },
+          "description": "문서 유형 필터 (비어 있으면 전체 검색)"
+        },
+        "limit": {
+          "type": "integer",
+          "description": "검색 결과 최대 수 (기본 5, 최대 20)",
+          "default": 5
+        }
+      },
+      "required": ["query"]
+    }
+  },
+  {
+    "name": "upload_document",
+    "description": "문서를 시스템에 업로드하고 Vector Store에 색인합니다.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "source_type": {
+          "type": "string",
+          "enum": ["spec", "regulation", "email"],
+          "description": "문서 유형"
+        },
+        "title": {
+          "type": "string",
+          "description": "문서 제목"
+        },
+        "version": {
+          "type": "string",
+          "description": "문서 버전 (선택)"
+        },
+        "effective_from": {
+          "type": "string",
+          "description": "유효 시작일 YYYY-MM-DD (선택)"
+        },
+        "department": {
+          "type": "string",
+          "description": "소관 부서 (선택)"
+        }
+      },
+      "required": ["source_type", "title"]
+    }
+  },
+  {
+    "name": "list_documents",
+    "description": "업로드된 문서 목록을 조회합니다.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "source_type": {
+          "type": "string",
+          "enum": ["spec", "regulation", "email"],
+          "description": "문서 유형 필터 (선택)"
+        },
+        "limit": {
+          "type": "integer",
+          "description": "최대 조회 수 (기본 20)",
+          "default": 20
+        }
+      }
+    }
+  }
+]
