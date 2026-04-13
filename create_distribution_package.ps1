@@ -42,19 +42,30 @@ Write-Host ""
 
 # Files and directories to include
 $FilesToCopy = @(
+    # Core Python files
     "main.py",
     "backend.py",
     "frontend.py",
+    "chat_service.py",
+    "codex_agent.py",
+    "codex_tools.json",
+    "document_store.py",
+    "rag_service.py",
+    
+    # Configuration and scripts
     "requirements.txt",
     "Run_production.bat",
     "Run_app.bat",
     "setup_firewall.ps1",
     ".env.production.example",
     ".gitignore",
+    
+    # Documentation
     "README.md",
     "QUICKSTART.md",
     "DEPLOYMENT.md",
     "ENV_SETUP_GUIDE.md",
+    "DISTRIBUTION_GUIDE.md",
     "project_access.md"
 )
 
