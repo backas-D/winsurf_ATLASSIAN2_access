@@ -2059,7 +2059,124 @@ if (treeNodes.length > 0) {
 
 ---
 
-**문서 버전**: v1.5.0  
-**최종 수정일**: 2026-04-10  
+## 15. v1.6.0 개선사항 (2026-04-16)
+
+### 15.1 변경 이력 요약
+
+#### 15.1.1 Jira WBS 연동 강화
+
+- `KGM_projectCode.csv`를 기준으로 프로젝트코드→WBS 코드 매핑 적용
+- `비고` 컬럼이 `old`인 항목은 매핑/액션에서 제외
+- 사이드바 버튼 텍스트를 `WBS 열기`로 변경
+- 버튼 클릭 시 WBS Gantt 페이지를 직접 열도록 URL 고정
+
+```text
+https://jira.hlklemove.com/projects/{WBS_CODE}?selectedItem=jp.ricksoft.plugins.wbsgantt-for-jira:wbsgantt-project
+```
+
+#### 15.1.2 Jira 이슈 결과 표시 개선
+
+- 결과 제목에 WBS 코드 표시: `Jira 이슈 검색 결과 (WBS: KGMJ150)`
+- 카드 상단에 `이슈키 / 제목` 형태로 표시
+- 완료 이슈 제외 기준을 문자열 매칭에서 Jira 실제 상태 카테고리로 변경
+  - 제외 기준: `statusCategory.key == "done"`
+- `JiraIssue` 데이터에 상태 카테고리 필드 추가
+  - `status_category_key`
+  - `status_category_name`
+
+#### 15.1.3 챗봇 가독성/입력 UX 개선
+
+- 응답 텍스트 줄바꿈 유지
+- 번호형/불릿형 개조식 자동 렌더링
+  - `1.`, `2)` → ordered list
+  - `-`, `*`, `•` → unordered list
+- 채팅창 이미지 붙여넣기(`Ctrl+V`) 지원
+  - 썸네일 미리보기
+  - 이미지별 제거 버튼
+  - 전송 시 `/api/documents` 업로드 후 첨부 파일명 포함
+- 이미지 첨부 질의 시 Confluence 트리 컨텍스트 자동 첨부
+  - 제목 / 페이지ID / URL 목록
+  - 스크린샷 질의에서 페이지 해석 정확도 향상
+
+### 15.2 단계별 상세 사용자 가이드
+
+#### 15.2.1 WBS 열기 사용 절차
+
+1. 좌측 사이드바 `프로젝트 코드` 입력창에 코드 입력 (예: `J150`)
+2. `WBS 열기` 버튼 클릭
+3. 새 탭에서 아래 패턴의 URL이 열리는지 확인
+
+```text
+/projects/{WBS_CODE}?selectedItem=jp.ricksoft.plugins.wbsgantt-for-jira:wbsgantt-project
+```
+
+4. 기존 탭의 `Jira 이슈 검색 결과` 패널이 동시에 갱신되는지 확인
+
+#### 15.2.2 Jira 이슈 결과 확인 절차
+
+1. 결과 패널 제목에 WBS가 표시되는지 확인
+   - 예: `Jira 이슈 검색 결과 (WBS: KGMJ150)`
+2. 목록에서 카드 상단이 `이슈키 / 제목` 형태인지 확인
+3. 상태 카테고리가 `Done`인 이슈가 제외되는지 확인
+4. 진행중/검토중 등 완료 전 상태 이슈는 표시되는지 확인
+
+#### 15.2.3 챗봇 이미지 질의 절차
+
+1. 채팅 입력창 클릭 후 이미지 클립보드 붙여넣기(`Ctrl+V`)
+2. 입력창 하단에 썸네일이 나타나는지 확인
+3. 필요 시 `✕` 버튼으로 특정 이미지를 제거
+4. 질의문을 입력하고 `전송` 클릭
+5. 사용자 메시지에 첨부 파일 태그(`📎 파일명`)가 표시되는지 확인
+6. 응답이 줄바꿈/개조식으로 읽기 좋게 표시되는지 확인
+7. Confluence 페이지를 참조하는 질의에서 페이지 인식이 개선되었는지 확인
+
+### 15.3 단계별 테스트 가이드
+
+#### 시나리오 A: WBS URL 오픈 검증
+
+1. 프로젝트 코드 `J150` 입력
+2. `WBS 열기` 클릭
+3. 기대 결과:
+   - 새 탭 URL에 `selectedItem=jp.ricksoft.plugins.wbsgantt-for-jira:wbsgantt-project` 포함
+   - 이슈 상세(`/issues/...`) 페이지가 아닌 WBS 화면으로 진입
+
+#### 시나리오 B: Done 이슈 필터 검증
+
+1. 동일 WBS로 이슈 목록 조회
+2. Jira 원본 화면과 비교
+3. 기대 결과:
+   - `statusCategory=Done` 이슈는 결과 패널에서 미표시
+   - 나머지 이슈는 정상 표시
+
+#### 시나리오 C: 이미지 질의 검증
+
+1. Confluence 트리가 표시된 상태에서 페이지 목록 화면 캡처
+2. 챗봇 입력창에 붙여넣고 질의 전송
+3. 기대 결과:
+   - 이미지 업로드 및 첨부 태그 표시
+   - 페이지를 찾지 못한다는 응답 빈도 감소
+   - 페이지 ID/제목 기반 요약 정확도 향상
+
+### 15.4 변경된 파일
+
+- `backend.py`
+  - WBS 매핑 소스 `KGM_projectCode.csv` 적용
+  - `old` 항목 제외
+  - Jira 이슈에 `statusCategory` 정보 포함
+- `frontend.py`
+  - WBS 매핑 기반 Jira 조회
+  - `statusCategory.key == done` 필터 적용
+- `templates/index.html`
+  - `WBS 열기` 버튼 동작 및 URL 보정
+  - Jira 결과 제목/카드 표시 개선
+  - 챗봇 이미지 붙여넣기 + 컨텍스트 첨부 로직
+- `static/styles.css`
+  - 챗봇 개조식/줄바꿈 가독성 스타일
+  - 이미지 미리보기/첨부 태그 스타일
+
+---
+
+**문서 버전**: v1.6.0  
+**최종 수정일**: 2026-04-16  
 **작성자**: backas-D  
 **문서 상태**: 실제 구현 기반 완료

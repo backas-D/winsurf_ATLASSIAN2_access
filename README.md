@@ -2,6 +2,16 @@
 
 Windsurf, Codex 등 AI 도구에서 로컬 stdio MCP 서버를 통해 ALM(Jira + Confluence + Bitbucket + Codebeamer) REST API를 사용할 수 있게 해주는 도구입니다.
 
+## 최근 변경 요약 (v1.6.0)
+
+- Jira 프로젝트 코드 입력 시 `KGM_projectCode.csv` 기반으로 WBS 코드 매핑이 적용됩니다(`old` 항목 제외).
+- 사이드바 버튼은 `WBS 열기`로 변경되었고, 클릭 시 Jira WBS Gantt 페이지가 새 탭에서 열립니다.
+- Jira 이슈 목록은 `statusCategory.key == "done"` 기준으로 완료 이슈를 제외해 표시합니다.
+- Jira 결과 카드 상단은 `이슈키 / 제목` 형식으로 통일되어 가독성이 개선되었습니다.
+- 챗봇 입력창에서 이미지 붙여넣기(`Ctrl+V`)를 지원하며, 썸네일 미리보기/개별 삭제가 가능합니다.
+- 이미지 포함 질의 전송 시 첨부 파일 업로드와 함께 Confluence 트리 컨텍스트(제목/페이지ID/URL)가 자동 첨부됩니다.
+- 챗봇 응답은 줄바꿈/번호형/불릿형 렌더링을 개선해 긴 답변의 가독성을 높였습니다.
+
 ---
 
 ## Quick Start (사용자)

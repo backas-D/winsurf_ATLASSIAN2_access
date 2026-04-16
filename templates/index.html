@@ -35,21 +35,13 @@
         <button type="button" onclick="showOEMProjectSelector()" class="primary-btn">Confluence 페이지 검색</button>
       </div>
 
-      <form class="stack" method="post" action="/search/jira" id="jiraSearchForm">
+      <form class="stack" method="post" action="/search/jira" id="jiraSearchForm" onsubmit="return handleJiraSearchSubmit(event)">
         <input type="hidden" id="jira_oem" name="oem" value="{{ state.selected_oem }}">
         <input type="hidden" id="jira_tree_data" name="tree_data" value="">
         <label for="jira_project_search">프로젝트 코드</label>
         <input id="jira_project_search" name="project_name" value="{{ state.project_name }}" placeholder="예: J115 또는 OV123">
-        <button type="submit">Jira 이슈 검색</button>
+        <button type="submit">WBS 열기</button>
       </form>
-      <script>
-        document.getElementById('jiraSearchForm').addEventListener('submit', function() {
-          const treeParam = new URLSearchParams(window.location.search).get('tree');
-          if (treeParam) {
-            document.getElementById('jira_tree_data').value = treeParam;
-          }
-        });
-      </script>
 
       <div class="stack">
         <button type="button" onclick="showActivityModal()" class="secondary-btn">
@@ -109,15 +101,17 @@
 
         <article class="panel">
           <div class="panel-head">
-            <h3>Jira 이슈 검색 결과</h3>
+            <h3>
+              Jira 이슈 검색 결과
+              {% if state.jira_wbs_code %}(WBS: {{ state.jira_wbs_code }}){% endif %}
+            </h3>
             <p>프로젝트의 Jira 이슈 목록을 표시하고 클릭 시 브라우저에서 엽니다.</p>
           </div>
           <div class="issue-list">
             {% if state.jira_issues %}
               {% for issue in state.jira_issues %}
                 <a class="issue-card" href="{{ issue.url }}" target="_blank" rel="noreferrer">
-                  <strong>{{ issue.key }}</strong>
-                  <span>{{ issue.summary }}</span>
+                  <strong class="issue-title">{{ issue.key }} / {{ issue.summary }}</strong>
                   <small>{{ issue.issue_type }} · {{ issue.status }} · {{ issue.assignee }}</small>
                 </a>
               {% endfor %}
@@ -284,6 +278,8 @@
             <textarea id="chatInput" class="chat-input" placeholder="메시지를 입력하세요..." rows="3"></textarea>
             <button id="sendChatBtn" class="btn-primary">전송</button>
           </div>
+          <div class="chat-paste-hint">이미지 붙여넣기: 입력창에서 <strong>Ctrl+V</strong></div>
+          <div id="chatImagePreview" class="chat-image-preview" style="display:none;"></div>
           
           <div id="chatStatus" class="chat-status"></div>
         </article>
@@ -1275,7 +1271,167 @@
     const sendChatBtn = document.getElementById('sendChatBtn');
     const clearChatBtn = document.getElementById('clearChatBtn');
     const chatStatus = document.getElementById('chatStatus');
+    const chatImagePreview = document.getElementById('chatImagePreview');
     const sessionId = 'session_' + Date.now();
+    const pendingChatImages = [];
+
+    function renderPendingChatImages() {
+      if (!pendingChatImages.length) {
+        chatImagePreview.style.display = 'none';
+        chatImagePreview.innerHTML = '';
+        return;
+      }
+
+      chatImagePreview.style.display = 'flex';
+      chatImagePreview.innerHTML = '';
+
+      pendingChatImages.forEach((item, index) => {
+        const card = document.createElement('div');
+        card.className = 'chat-image-card';
+
+        const img = document.createElement('img');
+        img.src = item.previewUrl;
+        img.alt = item.file.name;
+        img.className = 'chat-image-thumb';
+
+        const meta = document.createElement('div');
+        meta.className = 'chat-image-meta';
+        meta.textContent = item.file.name;
+
+        const removeBtn = document.createElement('button');
+        removeBtn.type = 'button';
+        removeBtn.className = 'chat-image-remove';
+        removeBtn.textContent = '✕';
+        removeBtn.onclick = () => {
+          URL.revokeObjectURL(item.previewUrl);
+          pendingChatImages.splice(index, 1);
+          renderPendingChatImages();
+        };
+
+        card.appendChild(img);
+        card.appendChild(meta);
+        card.appendChild(removeBtn);
+        chatImagePreview.appendChild(card);
+      });
+    }
+
+    function addPastedImage(file) {
+      if (!file || !file.type || !file.type.startsWith('image/')) {
+        return;
+      }
+
+      const ext = (file.type.split('/')[1] || 'png').toLowerCase();
+      const name = file.name && file.name.trim() ? file.name : `clipboard_${Date.now()}.${ext}`;
+      const normalizedFile = new File([file], name, { type: file.type });
+
+      pendingChatImages.push({
+        file: normalizedFile,
+        previewUrl: URL.createObjectURL(normalizedFile),
+      });
+      renderPendingChatImages();
+    }
+
+    async function uploadPendingChatImages() {
+      const uploadedTitles = [];
+      const failedTitles = [];
+
+      for (const item of pendingChatImages) {
+        const formData = new FormData();
+        formData.append('file', item.file, item.file.name);
+        formData.append('source_type', 'spec');
+        formData.append('title', item.file.name);
+
+        try {
+          const resp = await fetch('/api/documents', { method: 'POST', body: formData });
+          const data = await resp.json();
+          if (data.success) {
+            uploadedTitles.push(data.title || data.file_name || item.file.name);
+          } else {
+            failedTitles.push(item.file.name);
+          }
+        } catch (_) {
+          failedTitles.push(item.file.name);
+        }
+      }
+
+      pendingChatImages.forEach(item => URL.revokeObjectURL(item.previewUrl));
+      pendingChatImages.length = 0;
+      renderPendingChatImages();
+
+      return { uploadedTitles, failedTitles };
+    }
+
+    function buildConfluenceTreeContext() {
+      const treeNodes = Array.from(document.querySelectorAll('.tree-node'));
+      if (!treeNodes.length) {
+        return '';
+      }
+
+      const lines = treeNodes.slice(0, 40).map((node) => {
+        const pageId = node.getAttribute('data-page-id') || '';
+        const title = node.textContent.replace(/\s*\[\d+\]\s*$/, '').trim();
+        const url = node.getAttribute('href') || '';
+        return `- ${title} [${pageId}] ${url}`;
+      });
+
+      return ['[현재 Confluence 페이지 트리]', ...lines].join('\n');
+    }
+
+    function renderStructuredAssistantMessage(container, content) {
+      const lines = String(content || '').replace(/\r\n/g, '\n').split('\n');
+      let currentList = null;
+      let currentListType = null;
+
+      function startList(type) {
+        if (currentListType !== type) {
+          currentList = document.createElement(type);
+          currentList.className = 'message-list';
+          container.appendChild(currentList);
+          currentListType = type;
+        }
+      }
+
+      function endList() {
+        currentList = null;
+        currentListType = null;
+      }
+
+      lines.forEach((rawLine) => {
+        const line = rawLine.trim();
+
+        if (!line) {
+          endList();
+          const spacer = document.createElement('div');
+          spacer.className = 'message-spacer';
+          container.appendChild(spacer);
+          return;
+        }
+
+        const numberedMatch = line.match(/^\d+[.)]\s+(.*)$/);
+        if (numberedMatch) {
+          startList('ol');
+          const li = document.createElement('li');
+          li.textContent = numberedMatch[1];
+          currentList.appendChild(li);
+          return;
+        }
+
+        const bulletMatch = line.match(/^[-*•]\s+(.*)$/);
+        if (bulletMatch) {
+          startList('ul');
+          const li = document.createElement('li');
+          li.textContent = bulletMatch[1];
+          currentList.appendChild(li);
+          return;
+        }
+
+        endList();
+        const p = document.createElement('p');
+        p.className = 'message-text';
+        p.textContent = rawLine;
+        container.appendChild(p);
+      });
+    }
 
     function addMessage(role, content, data = null) {
       const messageDiv = document.createElement('div');
@@ -1300,9 +1456,26 @@
         contentDiv.appendChild(badge);
       }
       
-      const textP = document.createElement('p');
-      textP.textContent = content;
-      contentDiv.appendChild(textP);
+      if (role === 'assistant') {
+        renderStructuredAssistantMessage(contentDiv, content);
+      } else {
+        const textP = document.createElement('p');
+        textP.className = 'message-text';
+        textP.textContent = content;
+        contentDiv.appendChild(textP);
+      }
+
+      if (role === 'user' && data && Array.isArray(data.attachments) && data.attachments.length) {
+        const attachDiv = document.createElement('div');
+        attachDiv.className = 'chat-attachment-list';
+        data.attachments.forEach(name => {
+          const tag = document.createElement('span');
+          tag.className = 'chat-attachment-tag';
+          tag.textContent = `📎 ${name}`;
+          attachDiv.appendChild(tag);
+        });
+        contentDiv.appendChild(attachDiv);
+      }
 
       // Citations from RAG
       if (data && data.action_result && data.action_result.citations) {
@@ -1365,9 +1538,32 @@
 
     async function sendMessage() {
       const message = chatInput.value.trim();
-      if (!message) return;
-      
-      addMessage('user', message);
+      if (!message && pendingChatImages.length === 0) return;
+
+      const hasImages = pendingChatImages.length > 0;
+
+      let uploadedTitles = [];
+      if (hasImages) {
+        chatStatus.textContent = '붙여넣은 이미지 업로드 중...';
+        const uploadResult = await uploadPendingChatImages();
+        uploadedTitles = uploadResult.uploadedTitles;
+        if (uploadResult.failedTitles.length > 0) {
+          addMessage('system', `일부 이미지 업로드 실패: ${uploadResult.failedTitles.join(', ')}`);
+        }
+      }
+
+      if (!message && uploadedTitles.length === 0) {
+        chatStatus.textContent = '';
+        return;
+      }
+
+      const composedMessage = [
+        message || '붙여넣은 이미지를 참고해 분석해줘.',
+        uploadedTitles.length ? `[첨부 이미지 파일]\n- ${uploadedTitles.join('\n- ')}` : '',
+        hasImages ? buildConfluenceTreeContext() : ''
+      ].filter(Boolean).join('\n\n');
+
+      addMessage('user', message || '이미지 첨부', { attachments: uploadedTitles });
       chatInput.value = '';
       sendChatBtn.disabled = true;
       chatStatus.textContent = '처리 중...';
@@ -1379,7 +1575,7 @@
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
-            message: message,
+            message: composedMessage,
             session_id: sessionId
           })
         });
@@ -1434,6 +1630,23 @@
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
         sendMessage();
+      }
+    });
+
+    chatInput.addEventListener('paste', (e) => {
+      const clipboardItems = e.clipboardData ? e.clipboardData.items : [];
+      let foundImage = false;
+      for (const item of clipboardItems) {
+        if (item.kind === 'file' && item.type && item.type.startsWith('image/')) {
+          const file = item.getAsFile();
+          if (file) {
+            addPastedImage(file);
+            foundImage = true;
+          }
+        }
+      }
+      if (foundImage) {
+        e.preventDefault();
       }
     });
   </script>
@@ -1536,6 +1749,34 @@
         closeActivityModal();
       }
     });
+  </script>
+
+  <script>
+    const kgmWbsMap = JSON.parse('{{ kgm_wbs_map | tojson | safe }}');
+    const jiraBaseUrl = '{{ jira_base_url }}' || 'https://jira.hlklemove.com';
+
+    function handleJiraSearchSubmit(event) {
+      const projectCodeInput = document.getElementById('jira_project_search');
+      const projectCode = (projectCodeInput.value || '').trim().toUpperCase();
+
+      if (!projectCode) {
+        event.preventDefault();
+        alert('프로젝트 코드를 입력하세요.');
+        return false;
+      }
+
+      const matched = kgmWbsMap[projectCode];
+      const wbsCode = matched && matched.wbs_code ? matched.wbs_code : `KGM${projectCode}`;
+      const jiraUrl = `${jiraBaseUrl}/projects/${wbsCode}?selectedItem=jp.ricksoft.plugins.wbsgantt-for-jira:wbsgantt-project`;
+
+      const treeParam = new URLSearchParams(window.location.search).get('tree');
+      if (treeParam) {
+        document.getElementById('jira_tree_data').value = treeParam;
+      }
+
+      window.open(jiraUrl, '_blank', 'noopener,noreferrer');
+      return true;
+    }
   </script>
 </body>
 </html>

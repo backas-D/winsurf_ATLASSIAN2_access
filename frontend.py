@@ -19,6 +19,8 @@ from backend import (
     jira_create_issue,
     jira_update_issue,
     load_config,
+    load_kgm_wbs_mapping,
+    resolve_kgm_wbs_code,
 )
 from chat_service import ChatService, CodexChatService
 
@@ -39,6 +41,8 @@ def render(state: SearchState):
         "index.html",
         state=state,
         mcp_preview=export_mcp_config(cfg),
+        kgm_wbs_map=load_kgm_wbs_mapping(),
+        jira_base_url=cfg.jira_base_url,
     )
 
 
@@ -127,8 +131,21 @@ def search_jira():
         state.selected_oem = detected_oem
     
     try:
-        state.jira_issues = find_jira_issues(state.project_name, cfg)
-        state.flash_success = f"Jira 이슈 목록을 불러왔습니다. (OEM: {state.selected_oem})"
+        resolved = resolve_kgm_wbs_code(state.project_name)
+        jira_search_key = resolved["wbs_code"] if resolved else state.project_name
+        state.jira_wbs_code = jira_search_key
+        raw_issues = find_jira_issues(jira_search_key, cfg)
+        state.jira_issues = [
+            issue for issue in raw_issues
+            if str(issue.get("status_category_key", "")).lower() != "done"
+        ]
+        if resolved:
+            state.flash_success = (
+                f"Jira WBS 구조를 불러왔습니다. "
+                f"(프로젝트코드: {state.project_name} → WBS: {resolved['wbs_code']}, OEM: {state.selected_oem})"
+            )
+        else:
+            state.flash_success = f"Jira 이슈 목록을 불러왔습니다. (OEM: {state.selected_oem})"
     except Exception as exc:
         state.flash_error = str(exc)
     return render(state)

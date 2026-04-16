@@ -4,8 +4,10 @@ import json
 import re
 import sqlite3
 import uuid
+import csv
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -23,6 +25,7 @@ ENV_PATH = BASE_DIR / ".env"
 TRAINING_OUTPUT_PATH = BASE_DIR / "training_engine.md"
 TEST_RESULT_PATH = BASE_DIR / "test_result.md"
 MCP_CONFIG_PATH = BASE_DIR / "mcp_config.json"
+KGM_WBS_MAPPING_PATH = BASE_DIR / "KGM_projectCode.csv"
 
 OEM_PROJECT_PREFIXES = {
     "KGM": ["J", "Q", "U", "Y", "O", "X"],
@@ -79,12 +82,15 @@ class JiraIssue:
     issue_type: str
     assignee: str
     url: str
+    status_category_key: str = ""
+    status_category_name: str = ""
 
 
 @dataclass
 class SearchState:
     project_name: str = ""
     selected_oem: str = "KGM"
+    jira_wbs_code: str = ""
     show_project_selector: bool = False
     discovered_projects: list[dict] = field(default_factory=list)
     confluence_tree: list[dict[str, Any]] = field(default_factory=list)
@@ -129,6 +135,57 @@ def load_config() -> AppConfig:
         confluence_pat=raw.get("CONFLUENCE_PAT", "").strip(),
         mcp_dist_path=raw.get("ALM_MCP_STDIO_PATH", r"C:\Tools\alm-mcp-stdio\dist\index.js"),
     )
+
+
+@lru_cache(maxsize=1)
+def load_kgm_wbs_mapping() -> dict[str, dict[str, str]]:
+    mapping: dict[str, dict[str, str]] = {}
+    if not KGM_WBS_MAPPING_PATH.exists():
+        return mapping
+
+    encodings = ("utf-8-sig", "cp949", "utf-16")
+    rows: list[list[str]] | None = None
+
+    for encoding in encodings:
+        try:
+            with KGM_WBS_MAPPING_PATH.open("r", encoding=encoding, newline="") as fp:
+                rows = list(csv.reader(fp))
+            break
+        except Exception:
+            continue
+
+    if rows is None:
+        return {}
+
+    for values in rows:
+        if len(values) < 3:
+            continue
+
+        project_code = (values[0] or "").strip().upper()
+        jira_project = (values[1] or "").strip()
+        wbs_code = (values[2] or "").strip().upper()
+        remarks = (values[3] if len(values) > 3 else "").strip().lower()
+
+        if not project_code or project_code in {"프로젝트코드", "PROJECT"}:
+            continue
+        if remarks == "old":
+            continue
+        if not wbs_code or wbs_code == "OLD":
+            continue
+
+        mapping[project_code] = {
+            "jira_project": jira_project,
+            "wbs_code": wbs_code,
+        }
+
+    return mapping
+
+
+def resolve_kgm_wbs_code(project_code: str) -> dict[str, str] | None:
+    normalized = (project_code or "").strip().upper()
+    if not normalized:
+        return None
+    return load_kgm_wbs_mapping().get(normalized)
 
 
 def ensure_storage() -> None:
@@ -565,18 +622,22 @@ def find_jira_issues(project_name: str, cfg: AppConfig) -> list[dict[str, Any]]:
     if not cfg.jira_pat:
         board_url = f"{cfg.jira_base_url}/issues/?jql={quote_plus(f'project = {project_key} ORDER BY updated DESC')}"
         return [asdict(JiraIssue(key=project_key, summary="JIRA_PAT 미설정으로 검색 링크만 제공합니다.", status="CONFIG_REQUIRED", issue_type="Search", assignee="-", url=board_url))]
-    params = urlencode({"jql": f"project = {project_key} ORDER BY updated DESC", "maxResults": 100, "fields": "summary,status,issuetype,assignee"})
+    params = urlencode({"jql": f"project = {project_key} ORDER BY updated DESC", "maxResults": 100, "fields": "summary,status,statuscategorychangedate,issuetype,assignee"})
     payload = request_json(f"{cfg.jira_base_url}/rest/api/2/search?{params}", auth_headers(cfg.jira_pat))
     issues: list[dict[str, Any]] = []
     for issue in payload.get("issues", []):
         fields = issue.get("fields", {})
         assignee = fields.get("assignee") or {}
+        status_info = fields.get("status") or {}
+        status_category = status_info.get("statusCategory") or {}
         issues.append(
             asdict(
                 JiraIssue(
                     key=str(issue.get("key", "")),
                     summary=str(fields.get("summary", "")),
-                    status=str((fields.get("status") or {}).get("name", "")),
+                    status=str(status_info.get("name", "")),
+                    status_category_key=str(status_category.get("key", "")).lower(),
+                    status_category_name=str(status_category.get("name", "")),
                     issue_type=str((fields.get("issuetype") or {}).get("name", "")),
                     assignee=str(assignee.get("displayName", "-")),
                     url=f"{cfg.jira_base_url}/browse/{issue.get('key', '')}",
