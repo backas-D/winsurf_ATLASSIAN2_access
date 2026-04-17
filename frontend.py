@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import base64
+import sqlite3
+from pathlib import Path
+
 from flask import Blueprint, jsonify, render_template, request, session, Response
 
 from backend import (
@@ -29,6 +33,115 @@ frontend_bp = Blueprint("frontend", __name__)
 # USE_CODEX_AGENT=false in .env to rollback to legacy ChatService
 _use_codex = True
 chat_sessions: dict[str, ChatService | CodexChatService] = {}
+_BASE_DIR = Path(__file__).resolve().parent
+_DB_PATH = _BASE_DIR / "project_data.db"
+_DOCS_DIR = (_BASE_DIR / "Data" / "documents").resolve()
+_MAX_CHAT_IMAGE_COUNT = 3
+_MAX_CHAT_IMAGE_BYTES = 5 * 1024 * 1024
+_ALLOWED_CHAT_IMAGE_MIME = {
+    "image/png",
+    "image/jpeg",
+    "image/jpg",
+    "image/webp",
+    "image/gif",
+    "image/bmp",
+}
+
+
+def _resolve_chat_image_attachments(raw_attachments: object) -> tuple[list[dict[str, str]], list[str]]:
+    if not isinstance(raw_attachments, list):
+        return [], []
+
+    results: list[dict[str, str]] = []
+    warnings: list[str] = []
+    seen_doc_ids: set[int] = set()
+
+    mime_from_ext = {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".webp": "image/webp",
+        ".gif": "image/gif",
+        ".bmp": "image/bmp",
+    }
+
+    for idx, item in enumerate(raw_attachments):
+        if idx >= _MAX_CHAT_IMAGE_COUNT:
+            warnings.append(f"이미지는 최대 {_MAX_CHAT_IMAGE_COUNT}개까지만 분석됩니다.")
+            break
+
+        doc_id_raw = item.get("doc_id") if isinstance(item, dict) else None
+        if doc_id_raw is None and isinstance(item, dict):
+            doc_id_raw = item.get("id")
+
+        try:
+            doc_id = int(doc_id_raw)
+        except (TypeError, ValueError):
+            warnings.append("일부 이미지 식별자(doc_id)가 올바르지 않아 제외되었습니다.")
+            continue
+
+        if doc_id in seen_doc_ids:
+            continue
+        seen_doc_ids.add(doc_id)
+
+        try:
+            with sqlite3.connect(_DB_PATH) as conn:
+                row = conn.execute(
+                    "SELECT file_path, mime_type, title, file_name FROM documents WHERE id = ?",
+                    (doc_id,),
+                ).fetchone()
+        except sqlite3.Error:
+            warnings.append("이미지 문서 조회 중 오류가 발생해 비전 분석에서 제외되었습니다.")
+            continue
+
+        if not row:
+            warnings.append(f"문서 ID {doc_id}를 찾을 수 없어 제외되었습니다.")
+            continue
+
+        file_path_raw, mime_type_raw, title_raw, file_name_raw = row
+        if not file_path_raw:
+            warnings.append(f"문서 ID {doc_id}에 파일 경로가 없어 제외되었습니다.")
+            continue
+
+        file_path = Path(str(file_path_raw)).resolve()
+        if _DOCS_DIR != file_path and _DOCS_DIR not in file_path.parents:
+            warnings.append(f"문서 ID {doc_id}는 허용 경로 외 파일이라 제외되었습니다.")
+            continue
+
+        if not file_path.exists() or not file_path.is_file():
+            warnings.append(f"문서 ID {doc_id} 파일이 없어 제외되었습니다.")
+            continue
+
+        file_size = file_path.stat().st_size
+        if file_size > _MAX_CHAT_IMAGE_BYTES:
+            warnings.append(
+                f"{(title_raw or file_name_raw or file_path.name)} 파일이 너무 커서(>{_MAX_CHAT_IMAGE_BYTES // (1024 * 1024)}MB) 제외되었습니다."
+            )
+            continue
+
+        mime_type = str(mime_type_raw or "").lower().strip()
+        if mime_type == "image/jpg":
+            mime_type = "image/jpeg"
+        ext_mime = mime_from_ext.get(file_path.suffix.lower(), "")
+        if (not mime_type) or mime_type == "application/octet-stream" or not mime_type.startswith("image/"):
+            if ext_mime:
+                mime_type = ext_mime
+        if mime_type not in _ALLOWED_CHAT_IMAGE_MIME:
+            warnings.append(f"{(title_raw or file_name_raw or file_path.name)} 파일은 이미지 형식이 아니어서 제외되었습니다.")
+            continue
+
+        with open(file_path, "rb") as f:
+            encoded = base64.b64encode(f.read()).decode("ascii")
+
+        results.append(
+            {
+                "title": str(title_raw or file_name_raw or file_path.name),
+                "mime_type": mime_type,
+                "data_url": f"data:{mime_type};base64,{encoded}",
+            }
+        )
+
+    return results, warnings
 
 
 def build_default_state() -> SearchState:
@@ -306,9 +419,10 @@ def create_training():
 @frontend_bp.post("/api/chat")
 def chat():
     try:
-        data = request.get_json()
+        data = request.get_json() or {}
         user_message = data.get("message", "").strip()
         session_id = data.get("session_id", "default")
+        raw_image_attachments = data.get("image_attachments", [])
         
         if not user_message:
             return jsonify({"success": False, "message": "메시지를 입력해주세요."}), 400
@@ -325,7 +439,19 @@ def chat():
             chat_sessions[session_id] = CodexChatService(cfg) if _use_codex else ChatService(cfg)
         
         chat_service = chat_sessions[session_id]
-        result = chat_service.process_message(user_message)
+        vision_images, image_warnings = _resolve_chat_image_attachments(raw_image_attachments)
+
+        if isinstance(chat_service, CodexChatService):
+            result = chat_service.process_message(user_message, vision_images=vision_images)
+        else:
+            result = chat_service.process_message(user_message)
+
+        if image_warnings:
+            existing_warnings = result.get("warnings") if isinstance(result, dict) else None
+            if isinstance(existing_warnings, list):
+                existing_warnings.extend(image_warnings)
+            elif isinstance(result, dict):
+                result["warnings"] = image_warnings
         
         return jsonify(result)
         

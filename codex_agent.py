@@ -82,11 +82,17 @@ class CodexAgent:
     # Public API
     # ------------------------------------------------------------------
 
-    def process_message(self, user_message: str) -> dict[str, Any]:
+    def process_message(
+        self,
+        user_message: str,
+        vision_images: list[dict[str, str]] | None = None,
+    ) -> dict[str, Any]:
         """Process a user message and return a structured response."""
         self.conversation_history.append({"role": "user", "content": user_message})
 
-        if self.codex_available:
+        if vision_images:
+            result = self._process_via_chat_api(user_message, vision_images=vision_images)
+        elif self.codex_available:
             result = self._process_via_codex_cli(user_message)
         else:
             result = self._process_via_chat_api(user_message)
@@ -158,13 +164,30 @@ class CodexAgent:
     # Chat Completions fallback (function-calling)
     # ------------------------------------------------------------------
 
-    def _process_via_chat_api(self, user_message: str) -> dict[str, Any]:
+    def _process_via_chat_api(
+        self,
+        user_message: str,
+        vision_images: list[dict[str, str]] | None = None,
+    ) -> dict[str, Any]:
         """Use Chat Completions API with function-calling as fallback."""
         try:
             messages = [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 *self.conversation_history,
             ]
+
+            if vision_images and messages and messages[-1].get("role") == "user":
+                multimodal_content: list[dict[str, Any]] = [{"type": "text", "text": user_message}]
+                for image in vision_images:
+                    data_url = (image or {}).get("data_url", "")
+                    if data_url:
+                        multimodal_content.append(
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": data_url},
+                            }
+                        )
+                messages[-1] = {"role": "user", "content": multimodal_content}
 
             response = self.client.chat.completions.create(
                 model=self.model,

@@ -33,8 +33,12 @@ class CodexChatService:
         self.executor = ToolExecutor(config, rag_service=self.rag_service)
         self.agent = CodexAgent(config, tool_executor=self.executor)
 
-    def process_message(self, user_message: str) -> dict[str, Any]:
-        return self.agent.process_message(user_message)
+    def process_message(
+        self,
+        user_message: str,
+        vision_images: list[dict[str, str]] | None = None,
+    ) -> dict[str, Any]:
+        return self.agent.process_message(user_message, vision_images=vision_images)
 
     def clear_history(self) -> None:
         self.agent.clear_history()

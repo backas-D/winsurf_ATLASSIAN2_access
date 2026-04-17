@@ -2176,7 +2176,71 @@ https://jira.hlklemove.com/projects/{WBS_CODE}?selectedItem=jp.ricksoft.plugins.
 
 ---
 
-**문서 버전**: v1.6.0  
-**최종 수정일**: 2026-04-16  
+## 16. v1.6.1 개선사항 (2026-04-17)
+
+### 16.1 변경 이력 요약
+
+#### 16.1.1 Codex Agent 이미지 비전 입력 적용
+
+**문제**:
+- 이미지를 붙여넣어도 챗봇이 `첨부된 이미지를 확인할 수 없음`으로 응답하는 케이스 발생
+
+**원인**:
+- 이미지 파일명이 텍스트로만 전달되고, 모델에 실제 이미지 바이트/URL이 전달되지 않음
+
+**해결**:
+- `/api/chat` 요청에 `image_attachments` 메타데이터(`doc_id`, `title`) 전달
+- 서버에서 `documents` 테이블을 조회해 업로드 파일 경로를 안전 검증 후 `base64 data URL` 생성
+- `CodexChatService` → `CodexAgent` 경로에 `vision_images` 인자 추가
+- `CodexAgent`는 이미지가 포함된 요청에서 Chat API 멀티모달(`text + image_url`) 경로로 처리
+
+#### 16.1.2 이미지 MIME 판정 보완
+
+**문제**:
+- `image.png`가 `application/octet-stream`으로 저장된 경우 비전 입력에서 제외됨
+
+**해결**:
+- MIME이 비어있거나 generic(`application/octet-stream`)일 때 확장자 기반 MIME 재판정 적용
+  - `.png`, `.jpg`, `.jpeg`, `.webp`, `.gif`, `.bmp`
+
+### 16.2 안전성/제한 정책
+
+- 이미지 비전 입력은 최대 3장까지 처리
+- 장당 최대 5MB 제한
+- 허용 MIME만 분석(`image/*` 제한 목록)
+- `Data/documents` 하위 파일만 허용(경로 탈출 방지)
+- 일부 이미지 실패 시 나머지 이미지는 계속 분석하고 경고 메시지 표시
+
+### 16.3 검증 결과
+
+- Python 문법 검사 통과:
+
+```bash
+py -3 -m py_compile frontend.py chat_service.py codex_agent.py
+```
+
+- UI 동작 확인:
+  - 이미지 붙여넣기/첨부 태그 표시 유지
+  - 백엔드 제외 사유가 있을 경우 `참고:` 시스템 메시지로 노출
+
+### 16.4 변경된 파일
+
+- `templates/index.html`
+  - 이미지 업로드 결과의 `doc_id`를 채팅 payload에 포함
+  - 서버 warning 표시 로직 추가
+- `frontend.py`
+  - `image_attachments` 수신 및 문서 조회/base64 변환
+  - 이미지 제한(개수/용량/MIME/경로) 검증
+  - MIME 재판정(확장자 fallback) 보완
+- `chat_service.py`
+  - `CodexChatService.process_message(..., vision_images=...)` 확장
+- `codex_agent.py`
+  - 멀티모달 user message(`text + image_url`) 지원
+  - 이미지 포함 요청 시 Chat API 경로 우선 처리
+
+---
+
+**문서 버전**: v1.6.1  
+**최종 수정일**: 2026-04-17  
 **작성자**: backas-D  
 **문서 상태**: 실제 구현 기반 완료

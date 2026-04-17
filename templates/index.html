@@ -1336,6 +1336,7 @@
 
     async function uploadPendingChatImages() {
       const uploadedTitles = [];
+      const uploadedImages = [];
       const failedTitles = [];
 
       for (const item of pendingChatImages) {
@@ -1348,7 +1349,14 @@
           const resp = await fetch('/api/documents', { method: 'POST', body: formData });
           const data = await resp.json();
           if (data.success) {
-            uploadedTitles.push(data.title || data.file_name || item.file.name);
+            const resolvedTitle = data.title || data.file_name || item.file.name;
+            uploadedTitles.push(resolvedTitle);
+            if (data.id) {
+              uploadedImages.push({
+                doc_id: data.id,
+                title: resolvedTitle,
+              });
+            }
           } else {
             failedTitles.push(item.file.name);
           }
@@ -1361,7 +1369,7 @@
       pendingChatImages.length = 0;
       renderPendingChatImages();
 
-      return { uploadedTitles, failedTitles };
+      return { uploadedTitles, uploadedImages, failedTitles };
     }
 
     function buildConfluenceTreeContext() {
@@ -1546,10 +1554,12 @@
       const hasImages = pendingChatImages.length > 0;
 
       let uploadedTitles = [];
+      let uploadedImages = [];
       if (hasImages) {
         chatStatus.textContent = '붙여넣은 이미지 업로드 중...';
         const uploadResult = await uploadPendingChatImages();
         uploadedTitles = uploadResult.uploadedTitles;
+        uploadedImages = uploadResult.uploadedImages;
         if (uploadResult.failedTitles.length > 0) {
           addMessage('system', `일부 이미지 업로드 실패: ${uploadResult.failedTitles.join(', ')}`);
         }
@@ -1579,7 +1589,8 @@
           },
           body: JSON.stringify({
             message: composedMessage,
-            session_id: sessionId
+            session_id: sessionId,
+            image_attachments: uploadedImages
           })
         });
         
@@ -1587,6 +1598,9 @@
         
         if (data.success) {
           addMessage('assistant', data.message, data);
+          if (Array.isArray(data.warnings) && data.warnings.length) {
+            addMessage('system', `참고: ${data.warnings.join(' / ')}`);
+          }
           chatStatus.textContent = '';
         } else {
           addMessage('system', '오류: ' + data.message);
