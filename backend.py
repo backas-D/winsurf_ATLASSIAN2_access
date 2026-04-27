@@ -15,6 +15,7 @@ from urllib.parse import quote_plus, urlencode
 from urllib.request import Request, urlopen
 
 from flask import Blueprint, jsonify
+from bs4 import BeautifulSoup, Tag
 from werkzeug.datastructures import FileStorage
 from werkzeug.utils import secure_filename
 
@@ -26,6 +27,7 @@ TRAINING_OUTPUT_PATH = BASE_DIR / "training_engine.md"
 TEST_RESULT_PATH = BASE_DIR / "test_result.md"
 MCP_CONFIG_PATH = BASE_DIR / "mcp_config.json"
 KGM_WBS_MAPPING_PATH = BASE_DIR / "KGM_projectCode.csv"
+STLA_WBS_MAPPING_PATH = BASE_DIR / "STLA_projectCode.csv"
 
 OEM_PROJECT_PREFIXES = {
     "KGM": ["J", "Q", "U", "Y", "O", "X"],
@@ -84,6 +86,12 @@ class JiraIssue:
     url: str
     status_category_key: str = ""
     status_category_name: str = ""
+    start_date: str = ""
+    due_date: str = ""
+    fix_versions: str = ""
+    latest_comment_author: str = ""
+    latest_comment_created: str = ""
+    latest_comment_body: str = ""
 
 
 @dataclass
@@ -95,6 +103,7 @@ class SearchState:
     discovered_projects: list[dict] = field(default_factory=list)
     confluence_tree: list[dict[str, Any]] = field(default_factory=list)
     jira_issues: list[dict[str, Any]] = field(default_factory=list)
+    jira_issue_groups: list[dict[str, Any]] = field(default_factory=list)
     selected_confluence_page_id: str = ""
     training_output: str = ""
     flash_error: str = ""
@@ -166,7 +175,7 @@ def load_kgm_wbs_mapping() -> dict[str, dict[str, str]]:
         wbs_code = (values[2] or "").strip().upper()
         remarks = (values[3] if len(values) > 3 else "").strip().lower()
 
-        if not project_code or project_code in {"프로젝트코드", "PROJECT"}:
+        if not project_code or project_code in {"?꾨줈?앺듃肄붾뱶", "PROJECT"}:
             continue
         if remarks == "old":
             continue
@@ -181,11 +190,92 @@ def load_kgm_wbs_mapping() -> dict[str, dict[str, str]]:
     return mapping
 
 
-def resolve_kgm_wbs_code(project_code: str) -> dict[str, str] | None:
+@lru_cache(maxsize=1)
+def load_stla_wbs_mapping() -> dict[str, dict[str, str]]:
+    # Fallback map from provided STLA sheet when DRM blocks direct CSV parsing.
+    fallback_mapping: dict[str, dict[str, str]] = {
+        "F2X": {"jira_project": "STLA_F2X_F2U", "wbs_code": "STLAF2X"},
+        "F2U": {"jira_project": "STLA_F2X_F2U", "wbs_code": "STLAF2X"},
+        "F2X_27MY": {"jira_project": "STLA_F2X_F2U_27MY", "wbs_code": "STLAF2X27"},
+        "F2U_27MY": {"jira_project": "STLA_F2X_F2U_27MY", "wbs_code": "STLAF2X27"},
+    }
+
+    if not STLA_WBS_MAPPING_PATH.exists():
+        return fallback_mapping
+
+    # Fasoo DRM-protected files are not parseable CSV data.
+    try:
+        header_bytes = STLA_WBS_MAPPING_PATH.read_bytes()[:128]
+        if b"DRMONE" in header_bytes:
+            return fallback_mapping
+    except Exception:
+        return fallback_mapping
+
+    # Try parsing in case a decrypted CSV is provided in the future.
+    encodings = ("utf-8-sig", "cp949", "utf-16")
+    rows: list[list[str]] | None = None
+
+    for encoding in encodings:
+        try:
+            with STLA_WBS_MAPPING_PATH.open("r", encoding=encoding, newline="") as fp:
+                rows = list(csv.reader(fp))
+            break
+        except Exception:
+            continue
+
+    if rows is None:
+        return fallback_mapping
+
+    parsed: dict[str, dict[str, str]] = {}
+    for values in rows:
+        if len(values) < 3:
+            continue
+        project_code = (values[0] or "").strip().upper()
+        jira_project = (values[1] or "").strip()
+        wbs_code = (values[2] or "").strip().upper()
+        if (
+            not project_code
+            or "프로젝트" in project_code
+            or "PROJECT" in project_code
+            or not re.fullmatch(r"[A-Z0-9_]+", project_code)
+        ):
+            continue
+        if not wbs_code or not re.fullmatch(r"[A-Z0-9_]+", wbs_code):
+            continue
+        if jira_project and not re.fullmatch(r"[A-Z0-9_]+", jira_project.upper()):
+            continue
+        parsed[project_code] = {"jira_project": jira_project, "wbs_code": wbs_code}
+
+    if not parsed:
+        return fallback_mapping
+    return parsed
+
+
+@lru_cache(maxsize=1)
+def load_oem_wbs_mapping() -> dict[str, dict[str, dict[str, str]]]:
+    return {
+        "KGM": load_kgm_wbs_mapping(),
+        "STLA": load_stla_wbs_mapping(),
+    }
+
+
+def resolve_oem_wbs_code(project_code: str, oem: str | None = None) -> dict[str, str] | None:
     normalized = (project_code or "").strip().upper()
     if not normalized:
         return None
-    return load_kgm_wbs_mapping().get(normalized)
+
+    all_mapping = load_oem_wbs_mapping()
+    if oem:
+        target_oem = (oem or "").strip().upper()
+        oem_map = all_mapping.get(target_oem) or {}
+        if normalized in oem_map:
+            return oem_map[normalized]
+
+    # Fallback: scan all OEM maps.
+    for oem_map in all_mapping.values():
+        if normalized in oem_map:
+            return oem_map[normalized]
+    return None
 
 
 def ensure_storage() -> None:
@@ -621,29 +711,82 @@ def find_jira_issues(project_name: str, cfg: AppConfig) -> list[dict[str, Any]]:
     project_key = resolve_jira_project_key(project_name, cfg)
     if not cfg.jira_pat:
         board_url = f"{cfg.jira_base_url}/issues/?jql={quote_plus(f'project = {project_key} ORDER BY updated DESC')}"
-        return [asdict(JiraIssue(key=project_key, summary="JIRA_PAT 미설정으로 검색 링크만 제공합니다.", status="CONFIG_REQUIRED", issue_type="Search", assignee="-", url=board_url))]
-    params = urlencode({"jql": f"project = {project_key} ORDER BY updated DESC", "maxResults": 100, "fields": "summary,status,statuscategorychangedate,issuetype,assignee"})
-    payload = request_json(f"{cfg.jira_base_url}/rest/api/2/search?{params}", auth_headers(cfg.jira_pat))
+        return [asdict(JiraIssue(key=project_key, summary="JIRA_PAT 誘몄꽕?뺤쑝濡?寃??留곹겕留??쒓났?⑸땲??", status="CONFIG_REQUIRED", issue_type="Search", assignee="-", url=board_url))]
     issues: list[dict[str, Any]] = []
-    for issue in payload.get("issues", []):
-        fields = issue.get("fields", {})
-        assignee = fields.get("assignee") or {}
-        status_info = fields.get("status") or {}
-        status_category = status_info.get("statusCategory") or {}
-        issues.append(
-            asdict(
-                JiraIssue(
-                    key=str(issue.get("key", "")),
-                    summary=str(fields.get("summary", "")),
-                    status=str(status_info.get("name", "")),
-                    status_category_key=str(status_category.get("key", "")).lower(),
-                    status_category_name=str(status_category.get("name", "")),
-                    issue_type=str((fields.get("issuetype") or {}).get("name", "")),
-                    assignee=str(assignee.get("displayName", "-")),
-                    url=f"{cfg.jira_base_url}/browse/{issue.get('key', '')}",
+    start_at = 0
+    page_size = 100
+    total = None
+    while True:
+        params = urlencode(
+            {
+                "jql": f"project = {project_key} ORDER BY updated DESC",
+                "startAt": start_at,
+                "maxResults": page_size,
+                "fields": "summary,status,statuscategorychangedate,issuetype,assignee,duedate,fixVersions,comment,customfield_10201,customfield_10202,customfield_10800",
+            }
+        )
+        payload = request_json(f"{cfg.jira_base_url}/rest/api/2/search?{params}", auth_headers(cfg.jira_pat))
+        page_issues = payload.get("issues", [])
+        if total is None:
+            total = int(payload.get("total", 0))
+
+        for issue in page_issues:
+            fields = issue.get("fields", {})
+            assignee = fields.get("assignee") or {}
+            status_info = fields.get("status") or {}
+            status_category = status_info.get("statusCategory") or {}
+
+            due_date_raw = (
+                fields.get("duedate")
+                or fields.get("customfield_10202")  # End date
+                or fields.get("customfield_10800")  # End date(Actual)
+                or ""
+            )
+            due_date = due_date_raw if due_date_raw else ""
+            start_date_raw = fields.get("customfield_10201") or ""
+            start_date = start_date_raw if start_date_raw else ""
+            comment_info = fields.get("comment") or {}
+            comments = comment_info.get("comments") or []
+            latest_comment = comments[-1] if comments else {}
+            latest_comment_author = str((latest_comment.get("author") or {}).get("displayName", ""))
+            latest_comment_created_raw = str(latest_comment.get("created") or "")
+            latest_comment_created = (
+                latest_comment_created_raw[:16].replace("T", " ")
+                if latest_comment_created_raw
+                else ""
+            )
+            latest_comment_body_raw = str(latest_comment.get("body") or "")
+            latest_comment_body = re.sub(r"\s+", " ", latest_comment_body_raw.replace("\xa0", " ")).strip()
+            if len(latest_comment_body) > 200:
+                latest_comment_body = latest_comment_body[:197].rstrip() + "..."
+
+            fix_versions_list = fields.get("fixVersions") or []
+            fix_versions = ", ".join(v.get("name", "") for v in fix_versions_list if v.get("name"))
+
+            issues.append(
+                asdict(
+                    JiraIssue(
+                        key=str(issue.get("key", "")),
+                        summary=str(fields.get("summary", "")),
+                        status=str(status_info.get("name", "")),
+                        status_category_key=str(status_category.get("key", "")).lower(),
+                        status_category_name=str(status_category.get("name", "")),
+                        issue_type=str((fields.get("issuetype") or {}).get("name", "")),
+                        assignee=str(assignee.get("displayName", "-")),
+                        url=f"{cfg.jira_base_url}/browse/{issue.get('key', '')}",
+                        start_date=start_date,
+                        due_date=due_date,
+                        fix_versions=fix_versions,
+                        latest_comment_author=latest_comment_author,
+                        latest_comment_created=latest_comment_created,
+                        latest_comment_body=latest_comment_body,
+                    )
                 )
             )
-        )
+
+        start_at += len(page_issues)
+        if not page_issues or (total is not None and start_at >= total):
+            break
     return issues
 
 
@@ -724,9 +867,128 @@ def upload_base64_image_to_confluence(page_id: str, base64_data: str, image_inde
         return ''
 
 
+def _rebuild_quill_list_container(container: Tag, soup: BeautifulSoup) -> list[Tag]:
+    """Convert flat Quill list markup into nested ol/ul lists for Confluence."""
+    direct_items = [child for child in container.children if isinstance(child, Tag) and child.name == "li"]
+    if not direct_items:
+        return []
+
+    has_quill_markup = False
+    for item in direct_items:
+        classes = item.get("class", [])
+        if isinstance(classes, str):
+            classes = classes.split()
+        if item.has_attr("data-list") or any(str(c).startswith("ql-indent-") for c in classes):
+            has_quill_markup = True
+            break
+    if not has_quill_markup:
+        return []
+
+    roots: list[Tag] = []
+    stack: list[dict[str, Any]] = []
+    previous_depth = 0
+    first_item = True
+
+    for li in direct_items:
+        classes = li.get("class", [])
+        if isinstance(classes, str):
+            classes = classes.split()
+
+        raw_depth = 0
+        kept_classes: list[str] = []
+        for cls in classes:
+            match = re.match(r"ql-indent-(\d+)$", str(cls))
+            if match:
+                raw_depth = int(match.group(1))
+            else:
+                kept_classes.append(str(cls))
+        if kept_classes:
+            li["class"] = kept_classes
+        elif li.has_attr("class"):
+            del li["class"]
+
+        data_list = str(li.get("data-list", "")).strip().lower()
+        if li.has_attr("data-list"):
+            del li["data-list"]
+
+        if first_item:
+            depth = 0 if raw_depth > 0 else raw_depth
+            first_item = False
+        else:
+            depth = min(raw_depth, previous_depth + 1)
+        previous_depth = depth
+
+        desired_list_tag = "ol" if data_list == "ordered" else "ul" if data_list == "bullet" else None
+        if desired_list_tag is None:
+            if depth < len(stack):
+                desired_list_tag = str(stack[depth]["tag"].name)
+            else:
+                desired_list_tag = str(container.name)
+
+        while len(stack) > depth + 1:
+            stack.pop()
+
+        if depth == 0:
+            need_new_root = (not stack) or (str(stack[0]["tag"].name) != desired_list_tag)
+            if need_new_root:
+                root_list = soup.new_tag(desired_list_tag)
+                roots.append(root_list)
+                stack = [{"tag": root_list, "last_li": None}]
+        else:
+            while len(stack) <= depth:
+                parent_entry = stack[-1]
+                parent_li = parent_entry.get("last_li")
+                if not isinstance(parent_li, Tag):
+                    depth = max(0, len(stack) - 1)
+                    break
+                new_child_list = soup.new_tag(desired_list_tag)
+                parent_li.append(new_child_list)
+                stack.append({"tag": new_child_list, "last_li": None})
+
+            if depth > 0 and str(stack[depth]["tag"].name) != desired_list_tag:
+                parent_entry = stack[depth - 1]
+                parent_li = parent_entry.get("last_li")
+                if isinstance(parent_li, Tag):
+                    replacement_list = soup.new_tag(desired_list_tag)
+                    parent_li.append(replacement_list)
+                    stack = stack[:depth] + [{"tag": replacement_list, "last_li": None}]
+                else:
+                    fallback_root = soup.new_tag(desired_list_tag)
+                    roots.append(fallback_root)
+                    stack = [{"tag": fallback_root, "last_li": None}]
+                    depth = 0
+
+        current_list = stack[depth]["tag"]
+        current_list.append(li)
+        stack[depth]["last_li"] = li
+
+        for idx in range(depth + 1, len(stack)):
+            stack[idx]["last_li"] = None
+
+    return roots
+
+
+def _normalize_quill_list_html_for_confluence(html: str) -> str:
+    if not html.strip():
+        return html
+    soup = BeautifulSoup(html, "html.parser")
+    list_tags = list(soup.find_all(["ol", "ul"]))
+    for container in list_tags:
+        rebuilt_roots = _rebuild_quill_list_container(container, soup)
+        if not rebuilt_roots:
+            continue
+        for root in rebuilt_roots:
+            container.insert_before(root)
+        container.decompose()
+    return str(soup)
+
+
 def sanitize_html_for_confluence(html: str, page_id: str, cfg: AppConfig, file_download_links: dict | None = None) -> str:
     """Sanitize HTML from Quill editor for Confluence XHTML compatibility"""
     import re
+
+    # Convert Quill flat list classes into real nested list structure for Confluence.
+    html = _normalize_quill_list_html_for_confluence(html)
     
     # Extract and upload Base64 images
     image_index = 0
@@ -741,16 +1003,16 @@ def sanitize_html_for_confluence(html: str, page_id: str, cfg: AppConfig, file_d
     html = re.sub(r'<img[^>]*src="(data:image/[^"]+)"[^>]*/?>', replace_base64_image, html)
     
     # Convert file attachment text to clickable Confluence download links
-    # Pattern: 📎 <strong>filename.ext</strong> (123.45 KB)
+    # Pattern: ?뱨 <strong>filename.ext</strong> (123.45 KB)
     def normalize_filename(name):
-        """파일명 정규화: 한글 등 비-ASCII 제거, 특수문자 정리"""
-        # 비-ASCII 문자 제거 (한글 등)
+        """?뚯씪紐??뺢퇋?? ?쒓? ??鍮?ASCII ?쒓굅, ?뱀닔臾몄옄 ?뺣━"""
+        # 鍮?ASCII 臾몄옄 ?쒓굅 (?쒓? ??
         name = re.sub(r'[^\x00-\x7F]', '', name)
-        # 영숫자, 마침표 외 모든 문자를 _로 치환
+        # ?곸닽?? 留덉묠????紐⑤뱺 臾몄옄瑜?_濡?移섑솚
         name = re.sub(r'[^a-zA-Z0-9.]', '_', name)
-        # 연속 _ 제거
+        # ?곗냽 _ ?쒓굅
         name = re.sub(r'_+', '_', name)
-        # 마침표 앞뒤 _ 제거 (예: 1_.msg → 1.msg)
+        # 留덉묠???욌뮘 _ ?쒓굅 (?? 1_.msg ??1.msg)
         name = re.sub(r'_\.', '.', name)
         name = re.sub(r'\._', '.', name)
         return name.strip('_').lower()
@@ -761,11 +1023,11 @@ def sanitize_html_for_confluence(html: str, page_id: str, cfg: AppConfig, file_d
         
         download_url = None
         if file_download_links:
-            # 정확 매칭 시도
+            # ?뺥솗 留ㅼ묶 ?쒕룄
             if filename in file_download_links:
                 download_url = file_download_links[filename]
             else:
-                # 정규화 매칭 (한글이 제거된 Confluence 파일명과 비교)
+                # ?뺢퇋??留ㅼ묶 (?쒓????쒓굅??Confluence ?뚯씪紐낃낵 鍮꾧탳)
                 norm = normalize_filename(filename)
                 for att_title, att_url in file_download_links.items():
                     if normalize_filename(att_title) == norm:
@@ -773,14 +1035,14 @@ def sanitize_html_for_confluence(html: str, page_id: str, cfg: AppConfig, file_d
                         break
         
         if download_url:
-            # XHTML에서 & → &amp; 이스케이프 필수
+            # XHTML?먯꽌 & ??&amp; ?댁뒪耳?댄봽 ?꾩닔
             safe_url = download_url.replace('&', '&amp;')
-            return f'<p><strong>📎 첨부: <a href="{safe_url}">{filename}</a></strong> ({filesize})</p>'
+            return f'<p><strong>?뱨 泥⑤?: <a href="{safe_url}">{filename}</a></strong> ({filesize})</p>'
         
-        # Fallback: 텍스트로만 표시
-        return f'<p><strong>📎 첨부: {filename}</strong> ({filesize})</p>'
+        # Fallback: ?띿뒪?몃줈留??쒖떆
+        return f'<p><strong>?뱨 泥⑤?: {filename}</strong> ({filesize})</p>'
     
-    html = re.sub(r'<p>📎 <strong>([^<]+)</strong> \(([^)]+)\)</p>', convert_file_link, html)
+    html = re.sub(r'<p>?뱨 <strong>([^<]+)</strong> \(([^)]+)\)</p>', convert_file_link, html)
     
     # Convert Quill font size classes to inline styles
     def convert_font_size(match):
@@ -826,27 +1088,40 @@ def confluence_update_page(page_id: str, append_text: str, title: str, cfg: AppC
         
         new_content = f'\n<p><strong>[{timestamp}]</strong></p>\n{sanitized_html}\n'
         insert_pos = -1
+
+        # Priority 1: Insert into the first No Print macro body (top insertion).
+        noprint_match = re.search(r'<ac:structured-macro\b[^>]*\bac:name="noprint"[^>]*>', current_body)
+        if noprint_match:
+            macro_start = noprint_match.start()
+            macro_end = current_body.find('</ac:structured-macro>', macro_start)
+            if macro_end != -1:
+                macro_end += len('</ac:structured-macro>')
+                noprint_block = current_body[macro_start:macro_end]
+                rich_body_match = re.search(r'<ac:rich-text-body\b[^>]*>', noprint_block)
+                if rich_body_match:
+                    insert_pos = macro_start + rich_body_match.end()
         
-        # Priority 1: Try to insert after [Software Release Note]
-        markers = ['[Software Release Note]', '[SRR] Release Note']
-        for marker in markers:
-            if marker in current_body:
-                marker_pos = current_body.find(marker)
-                # Find the end of the line/paragraph containing the marker
-                after_marker = current_body[marker_pos:]
-                
-                # Look for the next closing tag after the marker
-                close_tags = ['</p>', '</h1>', '</h2>', '</h3>', '</h4>', '</strong>']
-                min_pos = len(after_marker)
-                for tag in close_tags:
-                    pos = after_marker.find(tag)
-                    if pos != -1 and pos < min_pos:
-                        min_pos = pos + len(tag)
-                
-                insert_pos = marker_pos + min_pos
-                break
+        # Priority 2: Try to insert after [Software Release Note]
+        if insert_pos == -1:
+            markers = ['[Software Release Note]', '[SRR] Release Note']
+            for marker in markers:
+                if marker in current_body:
+                    marker_pos = current_body.find(marker)
+                    # Find the end of the line/paragraph containing the marker
+                    after_marker = current_body[marker_pos:]
+                    
+                    # Look for the next closing tag after the marker
+                    close_tags = ['</p>', '</h1>', '</h2>', '</h3>', '</h4>', '</strong>']
+                    min_pos = len(after_marker)
+                    for tag in close_tags:
+                        pos = after_marker.find(tag)
+                        if pos != -1 and pos < min_pos:
+                            min_pos = pos + len(tag)
+                    
+                    insert_pos = marker_pos + min_pos
+                    break
         
-        # Priority 2: Try to insert after the info macro (참고사항)
+        # Priority 3: Try to insert after the info macro (李멸퀬?ы빆)
         if insert_pos == -1 and '<ac:structured-macro ac:name="info">' in current_body:
             start_pos = current_body.find('<ac:structured-macro ac:name="info">')
             if start_pos != -1:
@@ -855,7 +1130,7 @@ def confluence_update_page(page_id: str, append_text: str, title: str, cfg: AppC
                 if end_pos != -1:
                     insert_pos = end_pos + len('</ac:structured-macro>')
         
-        # Priority 3: If no info macro, insert after page title (h1)
+        # Priority 4: If no info macro, insert after page title (h1)
         if insert_pos == -1:
             h1_tags = ['</h1>', '</h2>']  # Try h1 first, then h2
             for tag in h1_tags:
@@ -1179,7 +1454,7 @@ def extract_project_groups(tree_pages: list) -> list[dict]:
                 if project_code not in projects:
                     projects[project_code] = {
                         "id": project_code,
-                        "title": f"{project_code} 프로젝트",
+                        "title": f"{project_code} ?꾨줈?앺듃",
                         "type": "Vehicle Platform",
                         "count": 0,
                         "pages": []
@@ -1221,6 +1496,7 @@ def api_export_mcp():
 def api_recent_activity():
     from flask import request
     limit = request.args.get('limit', 10, type=int)
-    limit = min(limit, 50)  # 최대 50개로 제한
+    limit = min(limit, 50)  # 理쒕? 50媛쒕줈 ?쒗븳
     activities = get_recent_activity(limit)
     return jsonify({"ok": True, "activities": activities})
+

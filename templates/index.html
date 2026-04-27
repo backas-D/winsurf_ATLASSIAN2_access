@@ -108,11 +108,68 @@
             <p>프로젝트의 Jira 이슈 목록을 표시하고 클릭 시 브라우저에서 엽니다.</p>
           </div>
           <div class="issue-list">
-            {% if state.jira_issues %}
+            {% if state.jira_issue_groups %}
+              {% for group in state.jira_issue_groups %}
+                <section class="issue-group">
+                  <button
+                    type="button"
+                    class="issue-group-head issue-group-toggle"
+                    data-target="issue-group-{{ loop.index0 }}"
+                    aria-expanded="false"
+                  >
+                    <span class="issue-group-chevron" aria-hidden="true">▸</span>
+                    <span class="issue-group-title">Ver: {{ group.version }}</span>
+                    <span class="issue-group-count">{{ group.count }}건</span>
+                  </button>
+                  <div id="issue-group-{{ loop.index0 }}" class="issue-group-children is-collapsed">
+                    {% for issue in group.issues %}
+                      <a class="issue-card{% if issue.is_overdue %} issue-overdue{% elif issue.is_due_soon %} issue-due-soon{% endif %}" href="{{ issue.url }}" target="_blank" rel="noreferrer">
+                        <div class="issue-card-layout">
+                          <div class="issue-card-main">
+                            <strong class="issue-title">{{ issue.key }} / {{ issue.summary }}</strong>
+                            <small class="issue-detail-lines">
+                              <span>-. 유형 : {{ issue.issue_type or '-' }}</span>
+                              <span>-. 담당자 : {{ issue.assignee or '-' }}</span>
+                              <span>-. End date : {{ issue.due_date or '-' }}</span>
+                            </small>
+                          </div>
+                          <aside class="issue-comment-box">
+                            <p class="issue-comment-title">최근 댓글</p>
+                            {% if issue.latest_comment_body %}
+                              <p class="issue-comment-meta">{{ issue.latest_comment_author or '-' }} · {{ issue.latest_comment_created or '-' }}</p>
+                              <p class="issue-comment-body">{{ issue.latest_comment_body }}</p>
+                            {% else %}
+                              <p class="issue-comment-empty">최근 댓글 없음</p>
+                            {% endif %}
+                          </aside>
+                        </div>
+                      </a>
+                    {% endfor %}
+                  </div>
+                </section>
+              {% endfor %}
+            {% elif state.jira_issues %}
               {% for issue in state.jira_issues %}
-                <a class="issue-card" href="{{ issue.url }}" target="_blank" rel="noreferrer">
-                  <strong class="issue-title">{{ issue.key }} / {{ issue.summary }}</strong>
-                  <small>{{ issue.issue_type }} · {{ issue.status }} · {{ issue.assignee }}</small>
+                <a class="issue-card{% if issue.is_overdue %} issue-overdue{% elif issue.is_due_soon %} issue-due-soon{% endif %}" href="{{ issue.url }}" target="_blank" rel="noreferrer">
+                  <div class="issue-card-layout">
+                    <div class="issue-card-main">
+                      <strong class="issue-title">{{ issue.key }} / {{ issue.summary }}</strong>
+                      <small class="issue-detail-lines">
+                        <span>-. 유형 : {{ issue.issue_type or '-' }}</span>
+                        <span>-. 담당자 : {{ issue.assignee or '-' }}</span>
+                        <span>-. End date : {{ issue.due_date or '-' }}</span>
+                      </small>
+                    </div>
+                    <aside class="issue-comment-box">
+                      <p class="issue-comment-title">최근 댓글</p>
+                      {% if issue.latest_comment_body %}
+                        <p class="issue-comment-meta">{{ issue.latest_comment_author or '-' }} · {{ issue.latest_comment_created or '-' }}</p>
+                        <p class="issue-comment-body">{{ issue.latest_comment_body }}</p>
+                      {% else %}
+                        <p class="issue-comment-empty">최근 댓글 없음</p>
+                      {% endif %}
+                    </aside>
+                  </div>
                 </a>
               {% endfor %}
             {% else %}
@@ -135,8 +192,23 @@
             <input type="hidden" name="confluence_title" value="">
             <label for="confluence_selected_page">선택된 페이지</label>
             <input id="confluence_selected_page" type="text" disabled placeholder="트리에서 페이지를 선택하세요">
-            <label for="quill_editor">추가할 내용</label>
+            <div style="display:flex;justify-content:space-between;align-items:center;">
+              <label for="quill_editor" style="margin:0;">추가할 내용</label>
+              <button
+                type="button"
+                id="fetchReleaseNoteTopBtn"
+                class="btn-secondary"
+                style="padding:4px 10px;font-size:0.8rem;"
+              >
+                상단 내용 불러오기
+              </button>
+            </div>
+            <small id="releaseNoteFetchStatus" style="color:#6b7280;min-height:1.2em;display:block;"></small>
             <div id="quill_editor" style="height: 200px;"></div>
+            <div
+              id="releaseNoteStructuredPreview"
+              style="display:none;margin-top:10px;padding:10px;border:1px solid #d0d7de;border-radius:8px;max-height:320px;overflow:auto;background:#fff;"
+            ></div>
             <input type="hidden" id="confluence_append_text" name="confluence_append_text">
             <button type="submit">Confluence 내용 추가</button>
           </form>
@@ -592,7 +664,22 @@
               if (confluenceUploadSelectedPageInput) {
                 confluenceUploadSelectedPageInput.value = displayText;
               }
-              // RQMT section is auto-filled by autoFillRQMTSection() and should not change on tree click
+
+              // Release Note editor must start empty on every page selection.
+              const statusEl = document.getElementById('releaseNoteFetchStatus');
+              const previewEl = document.getElementById('releaseNoteStructuredPreview');
+              if (statusEl) {
+                statusEl.textContent = '';
+              }
+              if (previewEl) {
+                previewEl.innerHTML = '';
+                previewEl.style.display = 'none';
+              }
+              window.releaseNoteStructuredHtml = '';
+              window.__releaseNoteAutoInsertedBlock = '';
+              if (window.releaseNoteQuill) {
+                window.releaseNoteQuill.setText('', 'silent');
+              }
               
               // Visual feedback
               this.style.backgroundColor = 'rgba(13, 108, 116, 0.1)';
@@ -632,6 +719,127 @@
           }
         }
       });
+
+      // Expose Quill instance for release-note manual insert flow
+      window.releaseNoteQuill = quill;
+      window.__releaseNoteAutoInsertedBlock = '';
+      window.releaseNoteStructuredHtml = '';
+
+      // Fetch release-note top excerpt and insert it at top of editor.
+      window.fetchReleaseNoteTopAndInsert = async function(pageId, trigger = 'manual') {
+        const statusEl = document.getElementById('releaseNoteFetchStatus');
+        const previewEl = document.getElementById('releaseNoteStructuredPreview');
+        const triggerLabel = 'manual';
+        console.log(`[ReleaseNoteAutoInsert] trigger=${triggerLabel}, pageId=${pageId || ''}`);
+
+        if (!pageId) {
+          if (statusEl) {
+            statusEl.textContent = '선택된 페이지가 없어 불러오지 못했습니다.';
+          }
+          console.warn(`[ReleaseNoteAutoInsert] trigger=${triggerLabel}, skip reason=missing pageId`);
+          return;
+        }
+        if (!window.releaseNoteQuill) {
+          if (statusEl) {
+            statusEl.textContent = '에디터 준비 전이라 잠시 후 다시 시도해주세요.';
+          }
+          console.warn('[ReleaseNoteAutoInsert] Quill instance is not ready.');
+          return;
+        }
+
+        try {
+          if (statusEl) {
+            statusEl.textContent = '불러오는 중...';
+          }
+          const response = await fetch(`/api/release-note-top/${encodeURIComponent(pageId)}`);
+          console.log(`[ReleaseNoteAutoInsert] trigger=${triggerLabel}, api status=${response.status}`);
+          if (!response.ok) {
+            if (statusEl) {
+              statusEl.textContent = '조회 실패';
+            }
+            console.warn('[ReleaseNoteAutoInsert] API failed:', response.status);
+            return;
+          }
+
+          const data = await response.json();
+          if (!data.success || !data.marker_found || (!data.excerpt_text && !data.excerpt_html)) {
+            if (statusEl) {
+              statusEl.textContent = data && data.marker_found ? '삽입할 내용 없음' : '마커 없음';
+            }
+            console.log(
+              `[ReleaseNoteAutoInsert] trigger=${triggerLabel}, skip reason=${!data.success ? 'api-failure' : !data.marker_found ? 'marker-missing' : 'empty-excerpt'}`
+            );
+            return;
+          }
+
+          const excerpt = String(data.excerpt_text || '').trim();
+          const excerptHtml = String(data.excerpt_html || '').trim();
+          if (!excerpt && !excerptHtml) {
+            if (statusEl) {
+              statusEl.textContent = '삽입할 내용 없음';
+            }
+            console.log(`[ReleaseNoteAutoInsert] trigger=${triggerLabel}, skip reason=empty-trimmed-excerpt`);
+            return;
+          }
+
+          const quillRef = window.releaseNoteQuill;
+          const autoBlockText = excerpt ? `${excerpt}\n\n` : '';
+          const previousAutoBlock = window.__releaseNoteAutoInsertedBlock || '';
+          const hasTable = /<table\b/i.test(excerptHtml);
+
+          if (previousAutoBlock) {
+            const currentText = quillRef.getText();
+            if (currentText.startsWith(previousAutoBlock)) {
+              quillRef.deleteText(0, previousAutoBlock.length, 'silent');
+            }
+          }
+
+          if (hasTable) {
+            if (previewEl) {
+              previewEl.innerHTML = excerptHtml;
+              previewEl.style.display = 'block';
+            }
+            window.releaseNoteStructuredHtml = excerptHtml;
+            window.__releaseNoteAutoInsertedBlock = '';
+          } else if (excerptHtml) {
+            if (previewEl) {
+              previewEl.innerHTML = '';
+              previewEl.style.display = 'none';
+            }
+            window.releaseNoteStructuredHtml = '';
+            quillRef.clipboard.dangerouslyPasteHTML(0, `${excerptHtml}<p><br></p>`, 'silent');
+            window.__releaseNoteAutoInsertedBlock = autoBlockText || quillRef.getText(0, Math.min(quillRef.getLength(), 2000));
+          } else {
+            if (previewEl) {
+              previewEl.innerHTML = '';
+              previewEl.style.display = 'none';
+            }
+            window.releaseNoteStructuredHtml = '';
+            quillRef.insertText(0, autoBlockText, 'silent');
+            window.__releaseNoteAutoInsertedBlock = autoBlockText;
+          }
+          if (statusEl) {
+            statusEl.textContent = '삽입 완료';
+          }
+          console.log(
+            `[ReleaseNoteAutoInsert] trigger=${triggerLabel}, insert mode=${hasTable ? 'table-preview' : excerptHtml ? 'html' : 'text'}, insert length=${(autoBlockText || excerpt).length}`
+          );
+        } catch (error) {
+          if (statusEl) {
+            statusEl.textContent = '조회 실패';
+          }
+          console.warn('[ReleaseNoteAutoInsert] Unexpected error:', error);
+        }
+      };
+
+      const fetchReleaseNoteTopBtn = document.getElementById('fetchReleaseNoteTopBtn');
+      if (fetchReleaseNoteTopBtn) {
+        fetchReleaseNoteTopBtn.addEventListener('click', () => {
+          const pageIdInput = document.getElementById('confluence_page_id');
+          const pageId = pageIdInput ? String(pageIdInput.value || '').trim() : '';
+          window.fetchReleaseNoteTopAndInsert(pageId, 'manual');
+        });
+      }
       
       // 이미지 압축 함수
       function compressImage(file, maxWidth, maxHeight, quality) {
@@ -791,12 +999,17 @@
       if (updateForm) {
         updateForm.addEventListener('submit', function(e) {
           const htmlContent = quill.root.innerHTML;
+          const structuredHtml = (window.releaseNoteStructuredHtml || '').trim();
+          const editorIsEmpty = (htmlContent === '<p><br></p>' || htmlContent.trim() === '');
+          const mergedHtml = structuredHtml
+            ? `${structuredHtml}${editorIsEmpty ? '' : (`<p><br></p>${htmlContent}`)}`
+            : htmlContent;
           
           // 빈 에디터 체크 (<p><br></p>는 빈 상태)
-          if (htmlContent === '<p><br></p>' || htmlContent.trim() === '') {
+          if (!mergedHtml || mergedHtml.trim() === '' || mergedHtml.trim() === '<p><br></p>') {
             document.getElementById('confluence_append_text').value = '';
           } else {
-            document.getElementById('confluence_append_text').value = htmlContent;
+            document.getElementById('confluence_append_text').value = mergedHtml;
           }
           
           // 첨부 파일이 있으면 FormData로 전송
@@ -1388,8 +1601,44 @@
       return ['[현재 Confluence 페이지 트리]', ...lines].join('\n');
     }
 
-    function renderStructuredAssistantMessage(container, content) {
-      const lines = String(content || '').replace(/\r\n/g, '\n').split('\n');
+    function renderConfluenceHtmlLite(container, data) {
+      const ar = data && data.action_result ? data.action_result : null;
+      if (!ar) return false;
+      const htmlLite = ar.release_note_html_lite || ar.content_html_lite || '';
+      if (!htmlLite || typeof htmlLite !== 'string') return false;
+
+      const wrap = document.createElement('div');
+      wrap.className = 'confluence-lite';
+      wrap.innerHTML = htmlLite;
+      container.appendChild(wrap);
+      return true;
+    }
+
+    function renderStructuredAssistantMessage(container, content, data = null) {
+      const normalizedContent = String(content || '').replace(/\r\n/g, '\n');
+
+      const renderedHtmlLite = renderConfluenceHtmlLite(container, data);
+
+      if (normalizedContent.includes('[Software Release Note] Extracted Content')) {
+        const pre = document.createElement('pre');
+        pre.className = 'message-text';
+        pre.style.whiteSpace = 'pre-wrap';
+        pre.style.margin = '0';
+        const compact = normalizedContent
+          .split('\n')
+          .filter((line) => !line.startsWith('[Software Release Note] Extracted Content') && line.trim() !== '')
+          .slice(0, 3)
+          .join('\n');
+        pre.textContent = compact || '[Software Release Note] Extracted Content';
+        container.appendChild(pre);
+        return;
+      }
+
+      if (renderedHtmlLite) {
+        if (!normalizedContent.trim()) return;
+      }
+
+      const lines = normalizedContent.split('\n');
       let currentList = null;
       let currentListType = null;
 
@@ -1468,7 +1717,7 @@
       }
       
       if (role === 'assistant') {
-        renderStructuredAssistantMessage(contentDiv, content);
+        renderStructuredAssistantMessage(contentDiv, content, data);
       } else {
         const textP = document.createElement('p');
         textP.className = 'message-text';
@@ -1536,6 +1785,50 @@
             const moreP = document.createElement('p');
             moreP.textContent = `... 외 ${data.action_result.count - 5}개`;
             resultDiv.appendChild(moreP);
+          }
+        } else if (data.action_result.type === 'confluence_descendants') {
+          const parent = data.action_result.parent || {};
+          const pages = Array.isArray(data.action_result.pages) ? data.action_result.pages : [];
+
+          const parentP = document.createElement('p');
+          parentP.innerHTML = `<strong>상위 페이지:</strong> <a href="${parent.url || '#'}" target="_blank">${parent.title || parent.id || 'N/A'}</a>`;
+          resultDiv.appendChild(parentP);
+
+          const countP = document.createElement('p');
+          countP.textContent = `하위 페이지 수집: ${pages.length}개`;
+          resultDiv.appendChild(countP);
+
+          const listWrap = document.createElement('div');
+          listWrap.className = 'confluence-desc-list';
+          pages.slice(0, 5).forEach(page => {
+            const card = document.createElement('article');
+            card.className = 'confluence-desc-card';
+            const depth = page.depth || 1;
+            const title = page.title || 'Untitled';
+            const link = page.url || '#';
+            card.innerHTML = `<div class="confluence-desc-head">[L${depth}] <a href="${link}" target="_blank">${title}</a></div>`;
+
+            const bodyHtml = page.release_note_html_lite || page.content_html_lite || '';
+            if (bodyHtml) {
+              const body = document.createElement('div');
+              body.className = 'confluence-lite confluence-lite-snippet';
+              body.innerHTML = bodyHtml;
+              card.appendChild(body);
+            }
+            listWrap.appendChild(card);
+          });
+          resultDiv.appendChild(listWrap);
+
+          if (pages.length > 5) {
+            const moreP = document.createElement('p');
+            moreP.textContent = `... 외 ${pages.length - 5}개`;
+            resultDiv.appendChild(moreP);
+          }
+
+          if (data.action_result.truncated) {
+            const truncP = document.createElement('p');
+            truncP.textContent = `요약용 본문 미리보기가 일부 축약되었습니다. (${data.action_result.truncation_reason || 'preview limit'})`;
+            resultDiv.appendChild(truncP);
           }
         }
         
@@ -1769,7 +2062,7 @@
   </script>
 
   <script>
-    const kgmWbsMap = JSON.parse('{{ kgm_wbs_map | tojson | safe }}');
+    const oemWbsMap = JSON.parse('{{ oem_wbs_map | tojson | safe }}');
     const jiraBaseUrl = '{{ jira_base_url }}' || 'https://jira.hlklemove.com';
 
     function handleJiraSearchSubmit(event) {
@@ -1782,18 +2075,48 @@
         return false;
       }
 
-      const matched = kgmWbsMap[projectCode];
-      const wbsCode = matched && matched.wbs_code ? matched.wbs_code : `KGM${projectCode}`;
+      const selectedOEM = String((jiraOemInput && jiraOemInput.value) || 'KGM').toUpperCase();
+      const selectedMap = (oemWbsMap && oemWbsMap[selectedOEM]) ? oemWbsMap[selectedOEM] : {};
+      const matched = selectedMap[projectCode];
+      const wbsCode = matched && matched.wbs_code ? matched.wbs_code : projectCode;
       const jiraUrl = `${jiraBaseUrl}/projects/${wbsCode}?selectedItem=jp.ricksoft.plugins.wbsgantt-for-jira:wbsgantt-project`;
+      let wbsWindow = null;
+
+      try {
+        wbsWindow = window.open(jiraUrl, '_blank', 'noopener,noreferrer');
+      } catch (_) {
+        wbsWindow = null;
+      }
+
+      if (!wbsWindow) {
+        alert('팝업이 차단되었습니다. 브라우저에서 이 사이트의 팝업을 허용해주세요.');
+      }
 
       const treeParam = new URLSearchParams(window.location.search).get('tree');
       if (treeParam) {
         document.getElementById('jira_tree_data').value = treeParam;
       }
-
-      window.open(jiraUrl, '_blank', 'noopener,noreferrer');
       return true;
     }
+
+    document.addEventListener('DOMContentLoaded', () => {
+      document.querySelectorAll('.issue-group-toggle').forEach((toggleBtn) => {
+        toggleBtn.addEventListener('click', () => {
+          const targetId = toggleBtn.getAttribute('data-target');
+          const targetEl = targetId ? document.getElementById(targetId) : null;
+          if (!targetEl) return;
+
+          const isCollapsed = targetEl.classList.contains('is-collapsed');
+          if (isCollapsed) {
+            targetEl.classList.remove('is-collapsed');
+            toggleBtn.setAttribute('aria-expanded', 'true');
+          } else {
+            targetEl.classList.add('is-collapsed');
+            toggleBtn.setAttribute('aria-expanded', 'false');
+          }
+        });
+      });
+    });
   </script>
 </body>
 </html>
